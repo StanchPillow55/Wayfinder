@@ -65,6 +65,11 @@ static_assert(kServoPin == kBenchSignalGpioUnverified,
 // is an open bench question (docs/hardware/pinouts.md).
 [[maybe_unused]] static constexpr int kPwmHz = 50;
 [[maybe_unused]] static constexpr int kResBits = 14;
+// LEDC channel for the signal pin. The installed Arduino-ESP32 core (2.x,
+// platform espressif32 7.x) uses the channel-based LEDC API (setup/attach-pin/
+// write-channel/detach-pin) rather than the 3.x pin-based one. The actual calls
+// live only inside the motor output stage below. Channel 0 is unused elsewhere.
+[[maybe_unused]] static constexpr int kPwmChannel = 0;
 static constexpr int kMinPulseUs = 1000;
 static constexpr int kMaxPulseUs = 2000;
 static constexpr int kMaxAngle = 160;
@@ -124,12 +129,13 @@ static int angleToPulse(int angle) {
   if (pulseUs < kMinPulseUs) pulseUs = kMinPulseUs;
   if (pulseUs > kMaxPulseUs) pulseUs = kMaxPulseUs;
   if (!gAttached) {
-    ledcAttach(kMotorSignalPin, kPwmHz, kResBits);
+    ledcSetup(kPwmChannel, kPwmHz, kResBits);
+    ledcAttachPin(kMotorSignalPin, kPwmChannel);
     gAttached = true;
   }
   const uint32_t maxDuty = (1u << kResBits) - 1u;
   const uint32_t duty = static_cast<uint32_t>(pulseUs) * maxDuty / 20000u;
-  ledcWrite(kMotorSignalPin, duty);
+  ledcWrite(kPwmChannel, duty);
   gOutputActive = true;
 #else
   (void)pulseUs;
@@ -141,7 +147,7 @@ static int angleToPulse(int angle) {
 static void detachOutput() {
 #if WAYFINDER_MOTOR_ENABLE
   if (gAttached) {
-    ledcDetach(kMotorSignalPin);
+    ledcDetachPin(kMotorSignalPin);
     gAttached = false;
   }
   pinMode(kMotorSignalPin, INPUT);

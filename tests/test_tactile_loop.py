@@ -480,7 +480,10 @@ def test_firmware_inputs_do_not_touch_the_motor_pin_and_health_build_stays_safe(
     assert len(guarded) >= 3
     for chunk in (source[: source.index("static void writePulse")],):
         assert "ledcAttach" not in chunk
-    assert source.count("ledcAttach(kMotorSignalPin") == 1
+    # The installed Arduino-ESP32 core (2.x) uses the channel-based LEDC API, so
+    # the single motor-pin attach site is ledcAttachPin(pin, channel), not the
+    # 3.x pin-based ledcAttach(pin, freq, res). Still exactly one attach site.
+    assert source.count("ledcAttachPin(kMotorSignalPin") == 1
     assert "pollInputs();" in source and "setupInputs();" in source
     assert "servo" not in source.lower().replace("kservopin", "")
     assert "kServoPin = 18" in source
