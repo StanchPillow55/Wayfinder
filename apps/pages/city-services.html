@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>City services search</title>
+</head>
+<body>
+  <main>
+    <h1>City services search</h1>
+    <p>Find a city office or service and open its page.</p>
+    <form id="search-form" role="search">
+      <label for="q">Search</label>
+      <input id="q" name="q" type="search" placeholder="permit">
+      <button type="submit">Search</button>
+    </form>
+    <button type="button" id="open-today">Only offices open today</button>
+    <p id="status" role="status">All services.</p>
+    <ul id="results">
+      <li data-open="true"><a id="permits" href="building-permits.html">Building permits</a><p>Apply for a permit downtown.</p></li>
+      <li data-open="false"><a id="parking" href="parking.html">Parking permits</a><p>Evening parking at civic lots.</p></li>
+      <li data-open="true"><a id="clinic" href="clinic.html">Neighborhood clinic</a><p>Walk-in hours on weekdays.</p></li>
+    </ul>
+  </main>
+  <script>
+    const items = () => document.querySelectorAll("#results li");
+    document.querySelector("#search-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const query = document.querySelector("#q").value.trim().toLowerCase();
+      items().forEach((item) => {
+        item.hidden = Boolean(query) && !item.innerText.toLowerCase().includes(query);
+      });
+      document.querySelector("#status").textContent = query ? `Results for ${query}.` : "All services.";
+    });
+    document.querySelector("#open-today").addEventListener("click", () => {
+      items().forEach((item) => {
+        item.hidden = item.dataset.open !== "true";
+      });
+      document.querySelector("#status").textContent = "Showing offices open today.";
+    });
+  </script>
+</body>
+</html>

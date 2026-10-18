@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Wayfinder</title>
+  <link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+  <a class="skip" href="#command">Skip to command</a>
+  <header class="top">
+    <div>
+      <p class="eyebrow">Accessibility-first browser companion. Mac orchestrator.</p>
+      <h1>Wayfinder</h1>
+    </div>
+    <button type="button" id="stop">Stop</button>
+  </header>
+
+  <div id="live" class="live" aria-live="polite" aria-atomic="true"></div>
+
+  <section class="panel braille-panel" aria-labelledby="braille-heading">
+    <h2 id="braille-heading">Braille</h2>
+    <p id="braille-caption"></p>
+    <div class="braille-stage" id="braille-stage" tabindex="0" aria-keyshortcuts="ArrowUp ArrowDown ArrowLeft ArrowRight" aria-describedby="braille-caption">
+      <div class="braille-scene" id="braille-scene">
+        <div class="braille-plate" id="braille-plate"></div>
+      </div>
+    </div>
+    <div class="row">
+      <button type="button" id="braille-prev">Previous cells</button>
+      <button type="button" id="braille-next">Next cells</button>
+    </div>
+    <p class="hint">Grade 1 Braille of the live words, drawn as raised pins. Drag the display, or focus it and use the arrow keys, to turn it. This software view is not the motor, and it is not a physical Braille device.</p>
+  </section>
+
+  <main>
+    <section class="panel" aria-labelledby="command-heading">
+      <h2 id="command-heading">Command</h2>
+      <form id="command-form">
+        <label for="command">Say what you want</label>
+        <input id="command" name="command" autocomplete="off" placeholder="What is here?">
+        <button type="submit">Send</button>
+      </form>
+      <div class="row">
+        <button type="button" data-command="what is here">What is here</button>
+        <button type="button" data-command="explain">Explain</button>
+        <button type="button" data-command="compare">Compare</button>
+        <button type="button" data-command="go back">Go back</button>
+        <button type="button" data-command="less detail">Less detail</button>
+        <button type="button" data-command="more detail">More detail</button>
+      </div>
+      <p class="hint">Press 1 through 5 for an option when you are not typing and no confirmation is open. Escape declines a waiting confirmation.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="target-heading">
+      <h2 id="target-heading">Open a page</h2>
+      <p id="target-status">Opening the library help page.</p>
+      <div class="row" role="group" aria-label="Pages to open">
+        <button type="button" data-target="faq" aria-pressed="false">Library help (FAQ)</button>
+        <button type="button" data-target="search" aria-pressed="false">City services (search)</button>
+        <button type="button" data-target="form" aria-pressed="false">Room request (form)</button>
+        <button type="button" data-target="unsupported" aria-pressed="false">Market poster (unsupported)</button>
+        <button type="button" data-target="public" aria-pressed="false">Public page (best effort)</button>
+        <button type="button" data-target="fixture" aria-pressed="false">Harbor Line (offline fixture)</button>
+      </div>
+      <p class="hint">Local pages are served to a headless Chromium that Playwright drives. The public page needs the network and may fail, and then Wayfinder says so. Harbor Line is the labeled regression fixture and offline fallback, not the live browser.</p>
+    </section>
+
+    <section class="panel" id="confirm" hidden aria-labelledby="confirm-heading">
+      <h2 id="confirm-heading">Confirmation</h2>
+      <p id="confirm-text"></p>
+      <div class="row">
+        <button type="button" id="confirm-yes">Yes, do that</button>
+        <button type="button" id="confirm-no">No</button>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="where-heading">
+      <h2 id="where-heading">Where you are</h2>
+      <p id="purpose"></p>
+      <p id="summary"></p>
+      <p id="goal"></p>
+      <ul id="uncertainty"></ul>
+    </section>
+
+    <section class="panel" aria-labelledby="branch-heading">
+      <h2 id="branch-heading">What you can do</h2>
+      <ol id="branches"></ol>
+    </section>
+
+    <section class="panel" aria-labelledby="check-heading">
+      <h2 id="check-heading">Verification</h2>
+      <p id="verification">No page change has been checked yet.</p>
+      <p id="decision">No decision recorded for this turn.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="page-heading">
+      <h2 id="page-heading">Page snapshot</h2>
+      <p id="page-mode"></p>
+      <p id="page-meta"></p>
+      <h3 id="evidence-heading">What the adapter read</h3>
+      <ul id="page-evidence" aria-labelledby="evidence-heading"></ul>
+      <ul id="stations"></ul>
+      <ul id="routes"></ul>
+      <p id="page-notice"></p>
+      <iframe id="page-frame" class="page-frame" title="Page snapshot read by the browser adapter" sandbox tabindex="-1"></iframe>
+    </section>
+
+    <section class="panel" aria-labelledby="tactile-heading">
+      <h2 id="tactile-heading">Tactile</h2>
+      <div class="motor" aria-hidden="true">
+        <div class="motor-track"><div id="motor-bar" class="motor-bar"></div></div>
+      </div>
+      <p id="tactile-text"></p>
+      <p class="hint">The bar is the software tactile view of a motor run: duty, duration, and direction for the current pose. The 130 mini DC brushless motor spins, it does not hold an angle. A physical run is claimed only when a DevKit answers on USB, and none has. Target under 250 ms has not been measured on hardware.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="glance-heading">
+      <h2 id="glance-heading">Quiet glance</h2>
+      <ul id="glance"></ul>
+      <p class="hint">A text-only, camera-free glance of the same state, a few short lines for a small surface. It is a software projection. No glasses hardware or SDK is attached.</p>
+    </section>
+
+    <section class="panel" aria-labelledby="topology-heading">
+      <h2 id="topology-heading">Hardware topology</h2>
+      <p>The Mac holds canonical state. Each board has its own USB link. Nothing here uses a UART cable between an ESP32-S3 and an ESP32-C3.</p>
+      <ol id="devices"></ol>
+      <div class="row">
+        <button type="button" id="devkit-connection">Disconnect DevKit</button>
+        <button type="button" id="actuator">Disable actuator</button>
+        <button type="button" id="ping">Ping DevKit</button>
+        <button type="button" id="box3-speech">Send “what is here” from BOX-3</button>
+        <button type="button" id="p4-event">Record P4X-EYE person present</button>
+      </div>
+      <h3>Camera notes</h3>
+      <ul id="evidence"></ul>
+    </section>
+
+    <section class="panel" aria-labelledby="trace-heading">
+      <h2 id="trace-heading">Trace</h2>
+      <p id="trace-id">No turn yet.</p>
+      <ol id="trace"></ol>
+    </section>
+  </main>
+
+  <footer>
+    <p>ADR-001 and ADR-004. The actuator on hand is a 130 mini DC brushless motor. Its control signal is GPIO 18, an unverified assumption. No voltage, current, or driver pinout has been verified, nothing here energizes hardware, and the DevKit and BOX-3 and P4X-EYE are simulated unless a USB acknowledgement says otherwise.</p>
+  </footer>
+  <script src="/static/app.js"></script>
+</body>
+</html>
