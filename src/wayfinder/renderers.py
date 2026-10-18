@@ -65,16 +65,41 @@ def speech_payload(text: str) -> dict[str, object]:
     return {"text": compact[:280]}
 
 
+def _first_sentence(text: str, limit: int = 160) -> str:
+    compact = " ".join(text.split())
+    cut = compact.find(". ")
+    first = compact if cut < 0 else compact[: cut + 1]
+    return first[:limit]
+
+
+def _option_words(branches: list[Control], density: str) -> str:
+    """Options as spoken words. Brief names them; standard and full also flag a confirmation."""
+    parts = []
+    for index, branch in enumerate(branches, start=1):
+        label = branch.label[:48] if density == "brief" else branch.label
+        flag = " Needs confirmation." if branch.risk_class == "consequential" and density != "brief" else ""
+        parts.append(f"{index}. {label}.{flag}")
+    return " ".join(parts)
+
+
 def orientation_speech(summary: str, branches: list[Control], density: str) -> str:
-    options = " ".join(f"{index}. {branch.label}." for index, branch in enumerate(branches, start=1))
     if density == "full":
-        reasons = " ".join(
-            f"{index}. {branch.rationale}" for index, branch in enumerate(branches, start=1)
-        )
+        options = _option_words(branches, density)
+        reasons = " ".join(f"{index}. {branch.rationale}" for index, branch in enumerate(branches, start=1))
         return f"{summary} Options: {options} Why: {reasons}"
     if density == "brief":
-        return f"{summary} Options: {options}"
-    return f"{summary} Options: {options}"
+        return f"{_first_sentence(summary)} Options: {_option_words(branches[:3], density)}"
+    return f"{summary} Options: {_option_words(branches, density)}"
+
+
+def narrate_result(lead: str, branches: list[Control], density: str) -> str:
+    """What the person hears after an action. Density changes length, never meaning."""
+    if density == "brief":
+        return f"{_first_sentence(lead, 140)} Options: {_option_words(branches[:3], density)}"
+    if density == "full":
+        reasons = " ".join(f"{index}. {branch.rationale}" for index, branch in enumerate(branches, start=1))
+        return f"{lead} Options: {_option_words(branches, density)} Why: {reasons}"
+    return f"{lead} Options: {_option_words(branches, density)}"
 
 
 def _dots(*dots: int) -> int:

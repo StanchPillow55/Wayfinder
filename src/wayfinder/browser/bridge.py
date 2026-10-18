@@ -81,6 +81,37 @@ OBSERVE_JS = "() => {" + COLLECT_JS + r"""
     if (wrapping && textOf(wrapping)) return textOf(wrapping);
     return el.getAttribute("aria-label") || el.getAttribute("title") || el.name || el.id || "field";
   };
+  // Accessibility repair (read-only). A control with no accessible name may get a suggested one
+  // from nearby visible text. The suggestion is marked inferred and the live page is not changed.
+  const accName = (el) => textOf(el) || clean(el.getAttribute("title"), 120)
+    || clean((el.querySelector && el.querySelector("img[alt]") || {}).alt, 120)
+    || clean(el.getAttribute("aria-labelledby") ? [...el.getAttribute("aria-labelledby").split(/\s+/)].map((id) => textOf(document.getElementById(id))).join(" ") : "", 120);
+  const ownText = (el) => clean([...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent).join(" "), 80);
+  const nearby = (el) => {
+    const hint = (value) => clean(value, 60).replace(/[:\s]+$/, "");
+    let node = el.parentElement;
+    for (let depth = 0; node && depth < 3 && node !== document.body; depth += 1, node = node.parentElement) {
+      if (!/^(LI|TR|TD|P|FIELDSET|LABEL|DIV|SECTION|ARTICLE|SPAN)$/.test(node.tagName)) continue;
+      const clone = node.cloneNode(true);
+      clone.querySelectorAll("a, button, input, select, textarea, svg, script, style").forEach((x) => x.remove());
+      const text = clean(clone.innerText || clone.textContent, 140);
+      if (text && text.length <= 100) return { name: hint(text), source: "nearby text" };
+    }
+    let prev = el.previousSibling;
+    while (prev) {
+      const text = prev.nodeType === 3 ? clean(prev.textContent, 60) : (prev.nodeType === 1 && !/^(INPUT|SELECT|TEXTAREA|BUTTON|A)$/.test(prev.tagName) ? clean(prev.innerText, 60) : "");
+      if (text) return { name: hint(text), source: "nearby text" };
+      prev = prev.previousSibling;
+    }
+    const block = el.closest("section, article, li, form, fieldset");
+    const head = block && block.querySelector("h1, h2, h3, h4");
+    if (head && textOf(head)) return { name: hint(textOf(head)), source: "nearby heading" };
+    return null;
+  };
+  const humanPath = (href) => {
+    const tail = (href || "").split("#")[0].split("?")[0].replace(/\/+$/, "").split("/").pop() || "";
+    return clean(decodeURIComponent(tail).replace(/\.[a-z0-9]+$/i, "").replace(/[-_]+/g, " "), 60);
+  };
   const sensitive = /password|passwd|passcode|card|cvv|cvc|ssn|secret|token|iban|routing.?number/i;
   const sensitiveAuto = /^(cc-|current-password|new-password|one-time-code)/i;
   const disclosures = wfDisclosures(main).map((el, index) => {
@@ -97,9 +128,18 @@ OBSERVE_JS = "() => {" + COLLECT_JS + r"""
       open: el.getAttribute("aria-expanded") === "true", id: el.id || "", hidden: wfHidden(el)
     };
   });
-  const links = wfLinks(main).map((el, index) => ({
+  const links = wfLinks(main).map((el, index) => {
+    let name = accName(el);
+    let inferred = null;
+    if (!name) {
+      inferred = nearby(el) || (humanPath(el.getAttribute("href")) ? { name: humanPath(el.getAttribute("href")), source: "address" } : null);
+      name = inferred ? inferred.name : "";
+    }
+    return {
     index,
-    name: textOf(el),
+    name,
+    inferred: Boolean(inferred),
+    name_source: inferred ? inferred.source : "",
     href: el.getAttribute("href") || "",
     path: el.pathname || "",
     abs: el.href || "",
@@ -109,19 +149,31 @@ OBSERVE_JS = "() => {" + COLLECT_JS + r"""
     download: el.hasAttribute("download"),
     hidden: wfHidden(el),
     id: el.id || ""
-  }));
-  const buttons = wfButtons(main).map((el, index) => ({
+  };});
+  const buttons = wfButtons(main).map((el, index) => {
+    let name = accName(el);
+    const inferred = name ? null : nearby(el);
+    if (inferred) name = inferred.name;
+    return {
     index,
-    name: textOf(el),
+    name,
+    inferred: Boolean(inferred),
+    name_source: inferred ? inferred.source : "",
     type: (el.getAttribute("type") || (el.form ? "submit" : "button")).toLowerCase(),
     disabled: Boolean(el.disabled),
     hidden: wfHidden(el),
     id: el.id || ""
-  }));
+  };});
   const fields = wfFields(main).map((el, index) => {
     const tag = el.tagName.toLowerCase();
     let type = (el.getAttribute("type") || (tag === "input" ? "text" : tag)).toLowerCase();
-    const name = labelFor(el);
+    let name = labelFor(el);
+    const labelled = Boolean((el.id && document.querySelector(`label[for="${CSS.escape(el.id)}"]`)) || el.closest("label") || el.getAttribute("aria-label") || el.getAttribute("title"));
+    let inferred = null;
+    if (!labelled) {
+      inferred = nearby(el);
+      if (inferred) name = inferred.name;
+    }
     const hay = `${el.name || ""} ${el.id || ""} ${el.getAttribute("placeholder") || ""} ${el.getAttribute("aria-label") || ""}`;
     const secret = type === "password" || sensitive.test(name) || sensitive.test(el.name || "") || sensitive.test(el.id || "")
       || sensitiveAuto.test(el.getAttribute("autocomplete") || "");
@@ -140,6 +192,8 @@ OBSERVE_JS = "() => {" + COLLECT_JS + r"""
     }
     return {
       index, name, type, value, options,
+      inferred: Boolean(inferred),
+      name_source: inferred ? inferred.source : "",
       sensitive: secret,
       field_name: el.name || "",
       region: wfInChrome(el) ? "chrome" : "content",
@@ -153,6 +207,18 @@ OBSERVE_JS = "() => {" + COLLECT_JS + r"""
     level: el.tagName.toLowerCase(),
     text: textOf(el)
   }));
+  const roleOf = (el) => el.getAttribute("role") || ({ HEADER: "banner", NAV: "navigation", MAIN: "main", ASIDE: "complementary", FOOTER: "contentinfo", FORM: "form", SEARCH: "search", SECTION: "region" })[el.tagName] || el.tagName.toLowerCase();
+  const landmarks = [...document.querySelectorAll("header, nav, main, aside, footer, form, search, [role='banner'], [role='navigation'], [role='main'], [role='search'], [role='complementary'], [role='contentinfo'], [role='form'], section[aria-label], [role='region'][aria-label]")]
+    .filter((el) => !wfHidden(el)).slice(0, 14).map((el) => {
+      const labelled = clean(el.getAttribute("aria-label"), 60) || textOf(document.getElementById(el.getAttribute("aria-labelledby") || "")) || textOf(el.querySelector("h1, h2, h3"));
+      return { role: roleOf(el), label: clean(labelled, 60) };
+    });
+  const items = [...main.querySelectorAll("[data-wf-item]")].filter((el) => !wfHidden(el)).slice(0, 30).map((el, index) => ({
+    index,
+    name: clean(el.getAttribute("data-name") || textOf(el.querySelector("h1, h2, h3, h4, a, strong")), 80),
+    text: textOf(el).slice(0, 240)
+  }));
+  const mirror = clean((main.closest("[data-wf-mirror]") || main.querySelector("[data-wf-mirror]") || document.body).getAttribute("data-wf-mirror"), 20);
   const status = textOf(main.querySelector("[role='status']"));
   const bodyText = (document.body.innerText || "").slice(0, 4000);
   const challenge = /verify (that )?you are (a )?human|are you a robot|checking your browser|unusual traffic from your|complete the security check|press (and|&) hold|needs to review the security of your connection/i;
@@ -169,7 +235,7 @@ OBSERVE_JS = "() => {" + COLLECT_JS + r"""
     purpose: textOf(main.querySelector("p")) || textOf(main.querySelector("h1")) || document.title,
     excerpt: textOf(main),
     fulltext: (main.innerText || "").replace(/[ \t]+/g, " ").slice(0, 6000),
-    headings, details: disclosures, links, buttons, fields, status, signals,
+    headings, details: disclosures, links, buttons, fields, status, signals, landmarks, items, mirror,
     html: document.documentElement.outerHTML
   };
 }
@@ -405,6 +471,9 @@ class BrowserBridge:
         if page is None:
             return failure_observation("about:blank", "No browser page is open.")
         raw = self._evaluate(page)
+        if raw.get("mirror") and not self._is_local(page.url):
+            # The mirror marker is trusted only on pages this app serves. A website cannot claim it.
+            raw["mirror"] = ""
         version = self._versions.get(session_id, 0) + 1
         self._versions[session_id] = version
         trail = self._trail.setdefault(session_id, [])
@@ -590,6 +659,11 @@ class BrowserBridge:
         self._server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
+
+    def _is_local(self, url: str) -> bool:
+        if self._server is None:
+            return False
+        return url.startswith(f"http://127.0.0.1:{self._server.server_address[1]}/")
 
     def _local(self, target: str) -> str:
         self._ensure_server()

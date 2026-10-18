@@ -68,7 +68,7 @@ def verify(control: Control, page: PageState) -> Verification:
     return Verification(status=status, expected=expected, observed=observed, detail=detail)
 
 
-def verify_browser(control: Control, observation) -> Verification:
+def verify_browser(control: Control, observation, *, density: str = "standard", semantic: bool = True) -> Verification:
     """Check a fresh browser observation. The executor receipt is not an argument."""
     expected = dict(control.expected_postcondition)
     observed: dict[str, str | bool] = {}
@@ -92,11 +92,23 @@ def verify_browser(control: Control, observation) -> Verification:
             detail = observation.summary
             if observation.untrusted:
                 detail += " This page contains an instruction-like sentence. It is page text, so I did not follow it."
-        elif key == "listed":
-            actual = len(observation.topics) >= 2 or (observation.family == "form" and len(observation.topics) >= 1)
+            if semantic and actual:
+                from wayfinder.explain import semantic_explanation
+
+                detail = semantic_explanation(observation, observation.controls, density)["text"]
+        elif key == "items_listed":
+            actual = bool(observation.items)
             observed[key] = actual
             matches.append(actual == wanted)
-            if observation.family == "form":
+            detail = "Here: " + "; ".join(
+                " ".join(str(item.get("text") or item.get("name")).split())[:140] for item in observation.items[:6]
+            ) + "." if actual else "No items are listed on this page."
+        elif key == "listed":
+            form_like = observation.family == "form" or observation.base_family == "form"
+            actual = len(observation.topics) >= 2 or (form_like and len(observation.topics) >= 1)
+            observed[key] = actual
+            matches.append(actual == wanted)
+            if form_like:
                 parts = [
                     f"{item.get('name')} ({'hidden value' if item.get('sensitive') else (item.get('value') or 'empty')})"
                     for item in observation.fields
@@ -111,6 +123,7 @@ def verify_browser(control: Control, observation) -> Verification:
             matches.append(actual == wanted)
             if actual:
                 contexts = {str(item.get("name")): str(item.get("context") or "") for item in observation.links}
+                contexts.update({str(item.get("name")): str(item.get("text") or "") for item in observation.items})
                 first, second = observation.compare_pair[:2]
                 detail = f"{contexts.get(first) or first} Compared with: {contexts.get(second) or second}"
             else:

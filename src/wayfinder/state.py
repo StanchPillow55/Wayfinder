@@ -61,6 +61,26 @@ class Session:
         self.tactile_input: dict | None = None
         self.tactile_input_seq = 0
         self.branch_cursor: dict | None = None
+        # Memory, kind 1: the session path. Kinds 2 and 3 live in MemoryCurator (projects, preferences).
+        self.journey: list[dict] = []
+        self.journey_url = ""
+        self.project: str | None = None
+        self.branch_limit = 5
+        self.preferred_channels: list[str] = []
+        # Output switch. "all" means every permitted output is on. Switching never clears the task.
+        self.renderer = "all"
+        self.speech_muted = False
+        self.capabilities_off: set[str] = set()
+        self.selected: dict | None = None
+        self.selected_ids: list[str] = []
+        self.selection_log: list[dict] = []
+        self.prev_selections: list[dict] = []
+        self.goal_plan: dict | None = None
+        self.last_substantive_speech = ""
+        self.speech_before: str = ""
+        # Client-reported input channel states (mic, camera, ...). Status only, never media.
+        self.channel_status: dict[str, str] = {}
+        self.last_explained: dict | None = None
 
 
 class Runtime:

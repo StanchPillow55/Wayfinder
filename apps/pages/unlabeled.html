@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Neighborhood help desk (unlabeled controls)</title>
+</head>
+<body>
+  <main>
+    <h1>Neighborhood help desk</h1>
+    <p>Quick links and a message box. Several controls on this page have no accessible name.</p>
+    <ul>
+      <li>Library card questions <a href="library-help.html"><svg width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="7"></circle></svg></a></li>
+      <li>City services directory <a href="city-services.html"><svg width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="7"></circle></svg></a></li>
+      <li><a href="room-request.html"><svg width="16" height="16" aria-hidden="true"><circle cx="8" cy="8" r="7"></circle></svg></a></li>
+    </ul>
+    <form id="message">
+      <div><span>Your question</span> <input type="text" name="q1"></div>
+      <div><span>Card number</span> <input type="text" name="cardnum"></div>
+      <p>Send question <button type="submit"><svg width="16" height="16" aria-hidden="true"><rect width="14" height="14"></rect></svg></button></p>
+    </form>
+    <p id="status" role="status">Not submitted.</p>
+  </main>
+  <script>
+    document.querySelector("#message").addEventListener("submit", (event) => {
+      event.preventDefault();
+      document.querySelector("#status").textContent = "Message submitted. Demo page: nothing was sent.";
+    });
+  </script>
+</body>
+</html>

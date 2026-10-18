@@ -27,6 +27,8 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "box3_pins.h"  // UNVERIFIED button GPIOs; input only, active low
+
 static constexpr size_t kMaxBytes = 1024;
 static constexpr const char* kSelfId = "esp32_s3_box3";
 static constexpr const char* kFirmwareName = "box3_scaffold 0.1 source-only";
@@ -94,6 +96,49 @@ static void sendError(const char* traceId, uint32_t sequence, const char* ackId,
   JsonDocument payload;
   payload["transcript"] = transcript;
   sendMessage("speech.event", "speech", 0, payload.as<JsonObject>());
+}
+
+// ---- physical buttons -> touch.event control ------------------------------
+// Three momentary buttons (active low, INPUT_PULLUP) call the existing
+// emitTouchControl. Input only; this never drives a pin. GPIO0 (confirm) is the
+// confident BOOT button; the other two are UNVERIFIED (box3_pins.h).
+static constexpr uint32_t kBtnDebounceMs = 30;
+
+struct Box3Button {
+  int pin;
+  const char* control;  // "confirm" | "deny" | "stop"
+  bool stable;          // debounced state, true = pressed
+  bool raw;
+  uint32_t changedMs;
+};
+
+static Box3Button gBox3Buttons[3] = {
+    {kBox3ButtonConfirmGpio, "confirm", false, false, 0},
+    {kBox3ButtonDenyGpioUnverified, "deny", false, false, 0},
+    {kBox3ButtonStopGpioUnverified, "stop", false, false, 0},
+};
+
+static void setupButtons() {
+  for (auto& b : gBox3Buttons) {
+    pinMode(b.pin, INPUT_PULLUP);
+    b.raw = b.stable = (digitalRead(b.pin) == LOW);
+    b.changedMs = millis();
+  }
+}
+
+static void pollButtons() {
+  const uint32_t now = millis();
+  for (auto& b : gBox3Buttons) {
+    const bool sample = (digitalRead(b.pin) == LOW);
+    if (sample != b.raw) {
+      b.raw = sample;
+      b.changedMs = now;
+    }
+    if (b.raw != b.stable && now - b.changedMs >= kBtnDebounceMs) {
+      b.stable = b.raw;
+      if (b.stable) emitTouchControl(b.control);  // fire on press only
+    }
+  }
 }
 
 static void handleLine(const char* line, size_t len) {
@@ -192,6 +237,7 @@ static void pumpSerial() {
 
 void setup() {
   Serial.begin(115200);
+  setupButtons();
   delay(200);
   JsonDocument payload;
   payload["board"] = "ESP32-S3-BOX-3";
@@ -202,9 +248,13 @@ void setup() {
   payload["touch_driver"] = false;
   payload["mic_driver"] = false;
   payload["speaker_driver"] = false;
+  // Physical buttons -> touch.event control. The pins are UNVERIFIED except
+  // GPIO0 (BOOT) for confirm. Not a claim that all three are wired correctly.
+  payload["buttons"] = true;
   sendMessage("health", "boot", 0, payload.as<JsonObject>());
 }
 
 void loop() {
   pumpSerial();
+  pollButtons();
 }

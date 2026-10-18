@@ -176,6 +176,8 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     const core = WayfinderVisionCore;
 
     const toggle = document.querySelector("#vision-toggle");
+    const muteButton = document.querySelector("#vision-mute");
+    const chip = document.querySelector("#chip-camera");
     const stateNode = document.querySelector("#vision-state");
     const cursorNode = document.querySelector("#vision-cursor");
     const stage = document.querySelector("#vision-stage");
@@ -191,6 +193,8 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     const BOX = { x: 0.25, y: 0.08, w: 0.5, h: 0.84 };
 
     let on = false;
+    let paused = false;
+    let blocked = false;
     let stream = null;
     let timer = null;
     let detectTimer = null;
@@ -208,6 +212,43 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
 
     function setState(message) {
       stateNode.textContent = message;
+    }
+
+    function cameraStatus() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return "unsupported";
+      if (blocked) return "blocked";
+      if (!on) return "available";
+      return paused ? "muted" : "armed";
+    }
+
+    // Status words only go to the Mac. No frame, image, or pixel ever does.
+    function report() {
+      const status = cameraStatus();
+      const words = {
+        available: "CAMERA: off. Press C to arm",
+        armed: "CAMERA: live (laptop webcam)",
+        muted: "CAMERA: muted",
+        blocked: "CAMERA: blocked by the browser",
+        unsupported: "CAMERA: not supported here",
+      };
+      if (chip) {
+        chip.textContent = words[status];
+        chip.dataset.status = status;
+      }
+      muteButton.hidden = !on;
+      muteButton.textContent = paused ? "Unmute camera" : "Mute camera";
+      muteButton.setAttribute("aria-pressed", String(paused));
+      toggle.textContent = on ? "Camera off" : "Arm camera";
+      app.reportChannel({ camera: status });
+    }
+
+    function setPaused(next) {
+      paused = next;
+      if (stream) stream.getTracks().forEach((track) => (track.enabled = !paused));
+      previous = null;
+      if (paused) setState("Camera muted. Nothing is being watched. Unmute it to move and choose by looking.");
+      else setState("Camera unmuted. Laptop-camera demo, not gaze tracking. Nod once to move.");
+      report();
     }
 
     function branchButtons() {
@@ -264,8 +305,8 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       });
       if (signal === "next") lastNextAt = now;
       if (plan.kind === "move") {
-        setCursor(plan.cursor);
         setState("Move seen. Next option.");
+        await app.moveCursor(plan.cursor, "camera");
         showCursor();
       } else if (plan.kind === "select") {
         setCursor(plan.cursor);
@@ -337,7 +378,7 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     };
 
     function frame() {
-      if (!on || video.readyState < 2) return;
+      if (!on || paused || video.readyState < 2) return;
       const now = performance.now();
       const current = grayRegion();
       const energy = previous ? core.frameEnergy(previous, current) : 0;
@@ -393,8 +434,12 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
             : `The camera could not be opened (${error && error.name ? error.name : "unknown error"}). Nothing is being captured, and the camera selector is off.`,
         );
         stream = null;
+        blocked = Boolean(denied);
+        report();
         return;
       }
+      blocked = false;
+      paused = false;
       video.srcObject = stream;
       try {
         await video.play();
@@ -426,10 +471,12 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       timer = window.setInterval(frame, 90);
       if (detector) detectTimer = window.setInterval(detectLoop, 300);
       showCursor();
+      report();
     }
 
     function stop(message) {
       on = false;
+      paused = false;
       if (timer) window.clearInterval(timer);
       if (detectTimer) window.clearInterval(detectTimer);
       timer = null;
@@ -442,21 +489,34 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       toggle.setAttribute("aria-pressed", "false");
       setState(message || "Camera is off.");
       cursorNode.textContent = "No option is highlighted by the camera selector.";
+      report();
     }
 
     toggle.addEventListener("click", () => {
       if (on) stop("Camera is off. The camera selector is stopped. Nothing was recorded.");
       else start();
     });
+    muteButton.addEventListener("click", () => setPaused(!paused));
+    window.addEventListener("keydown", (event) => {
+      if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
+      const tag = event.target.tagName;
+      if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+      if (event.key.toLowerCase() === "c") {
+        event.preventDefault();
+        if (on) stop("Camera is off. The camera selector is stopped. Nothing was recorded.");
+        else start();
+      }
+    });
 
     threshold.addEventListener("input", () => {
       if (selector) selector.o.motion = Number(threshold.value);
     });
 
-    document.addEventListener("wayfinder:render", () => {
-      setCursor(0);
+    document.addEventListener("wayfinder:render", (event) => {
+      setCursor(event.detail.branch_cursor ? event.detail.branch_cursor.index : 0);
       if (on) showCursor();
     });
+    report();
 
     window.addEventListener("pagehide", () => {
       if (stream) stream.getTracks().forEach((track) => track.stop());
@@ -466,8 +526,9 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     // are received by this page. This maps only the same next and select signals and is
     // active only while "Use by looking" is on.
     window.WayfinderVision = {
+      cameraStatus,
       handleDeviceEvent(payload) {
-        if (!on) return null;
+        if (!on || paused) return null;
         const signal = mapper.feed(payload);
         if (signal) apply(signal, performance.now());
         return signal;
