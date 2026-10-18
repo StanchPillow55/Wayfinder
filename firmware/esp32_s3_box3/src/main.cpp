@@ -115,7 +115,8 @@ static PinWatch gWatch[kNumProbePins];
 
 // Diagnostic event: which safe candidate pin changed, and its level. Lets a
 // human discover the real button pin by pressing and reading the stream.
-static void emitDebugPin(int pin, int level) {
+// Only used when WAYFINDER_BOX3_PIN_PROBE is on.
+[[maybe_unused]] static void emitDebugPin(int pin, int level) {
   JsonDocument payload;
   payload["debug_pin"] = pin;
   payload["level"] = level;  // 0 = pressed (LOW), 1 = released (HIGH)
@@ -146,8 +147,9 @@ static void pollButtons() {
       // Discovery: report every edge on a safe candidate pin.
       emitDebugPin(w.pin, w.stable ? 0 : 1);
 #endif
-      // Confirmed mapping: GPIO0 press (LOW) -> confirm.
-      if (w.pin == kBox3ButtonConfirmGpio && w.stable) {
+      // Confirmed mapping: GPIO1 press (LOW) -> confirm. GPIO0 is deliberately
+      // never mapped: pressing it resets the board over native USB.
+      if (w.pin == kBox3ButtonConfirmGpio && w.pin != kBox3UsbResettingPin && w.stable) {
         emitTouchControl("confirm");
       }
     }

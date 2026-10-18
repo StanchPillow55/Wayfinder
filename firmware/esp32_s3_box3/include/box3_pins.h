@@ -1,30 +1,40 @@
-// Wayfinder ESP32-S3-BOX-3 button pin map. SOURCE ONLY. PINS ARE UNVERIFIED.
+// Wayfinder ESP32-S3-BOX-3 button pin map. SOURCE ONLY.
 //
-// Three momentary buttons -> touch.event {"control": ...}. Input only, active
-// low, internal pull-up (pressed = pin reads LOW). No panel, audio, touch, or
-// ADC driver is used. The Mac already accepts {"control":"confirm"|"deny"|
-// "stop"} as a touch.event from any board (see src/wayfinder/models.py
-// _validate_payload and orchestrator._ingest), so no Mac-side change is needed.
+// Buttons -> touch.event {"control": ...}. Input only, active low, internal
+// pull-up (pressed = pin reads LOW). The Mac already accepts
+// {"control":"confirm"|"deny"|"stop"} as a touch.event from any board
+// (src/wayfinder/models.py _validate_payload, orchestrator._ingest), so no
+// Mac-side change is needed.
 //
-// Pin confidence (from the official ESP32-S3-BOX-3 pinout / esp-bsp):
-//   GPIO0  BOOT button. A real dedicated digital input with a pull-up. This is
-//          the one button we are confident fires on day one. Mapped to confirm.
-//          NOTE: GPIO0 is a strapping pin. It must be HIGH at reset (its
-//          default). Only ever read it AFTER boot, never drive it. Holding it
-//          at power-on enters download mode; that is normal and expected.
-//   GPIO47, GPIO48  UNVERIFIED candidates for the two top-edge buttons. On the
-//          BOX-3 the top buttons may sit on an ADC ladder rather than dedicated
-//          GPIOs; if these two never register a press at the bench, that is why,
-//          and it is harmless (input-only). Confirm by pressing and watching the
-//          event stream, then record the working numbers in docs/hardware/sprint.md.
+// VERIFIED AT THE BENCH (2026-10-18, this board, over USB-Serial/JTAG):
+//   GPIO1  Usable physical input. Clean active-low press/release pairs, no USB
+//          disruption. Mapped to "confirm". (Schematic: speaker mute switch.)
+//   GPIO0  MCU-BOOT / strapping pin. Reads as a button, BUT every press DROPS
+//          the native-USB link and reboots the board (observed: reconnect +
+//          health reset on each press). Watched for diagnostics only; it must
+//          NOT trigger a control. Do not map an action to GPIO0.
 //
-// Change a number here and update docs/hardware/sprint.md with the measurement
-// before writing "verified" anywhere.
+// Pin facts from the official schematic (do NOT guess these):
+//   GPIO47 LCD BACKLIGHT control  -- NOT a button. Never touch.
+//   GPIO48 LCD RESET              -- NOT a button. Never touch.
+//   The three top "functional" buttons are an ADC button ladder, not plain
+//   digital GPIOs; only GPIO0 (unusable) and GPIO1 came through as digital.
+//
+// DISCOVERY MODE (WAYFINDER_BOX3_PIN_PROBE): emits a diagnostic touch.event
+// {"debug_pin":<gpio>,"level":0|1} on any watched-pin edge. OFF by default now
+// that GPIO1 is confirmed; set to 1 to re-run pin discovery at the bench.
 #pragma once
 
-// Confident: BOOT button, dedicated digital input, active low.
-static constexpr int kBox3ButtonConfirmGpio = 0;    // GPIO0 BOOT -> confirm
+#ifndef WAYFINDER_BOX3_PIN_PROBE
+#define WAYFINDER_BOX3_PIN_PROBE 0
+#endif
 
-// UNVERIFIED: top-edge buttons. Harmless if wrong (input-only).
-static constexpr int kBox3ButtonDenyGpioUnverified = 47;   // -> deny
-static constexpr int kBox3ButtonStopGpioUnverified = 48;   // -> stop
+// Safe dedicated digital inputs to watch. GPIO47/48 are LCD lines (excluded).
+// GPIO0 is watched so discovery can see it, but it is never mapped to a control.
+static constexpr int kBox3ProbePins[] = {0, 1};
+
+// Confirmed control button. GPIO1 is clean and does not disturb USB.
+static constexpr int kBox3ButtonConfirmGpio = 1;    // GPIO1 -> confirm
+
+// Explicitly NOT a control: pressing it resets the board over native USB.
+static constexpr int kBox3UsbResettingPin = 0;      // GPIO0 BOOT/strapping
