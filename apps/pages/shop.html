@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Access shop (local mirror)</title>
+</head>
+<body data-wf-mirror="commerce">
+  <main>
+    <h1>Access shop</h1>
+    <p>A local practice shop with large-print and tactile goods. Nothing here takes payment.</p>
+    <button type="button" id="under20">Only items under $20</button>
+    <p id="status" role="status">Cart: 0 items, $0.</p>
+    <ul id="products">
+      <li data-wf-item data-price="14" data-name="Large-print weekly planner">
+        <h2><a href="shop-item.html?id=planner">Large-print weekly planner</a></h2>
+        <p>$14. 52 pages, 18-point type, lies flat.</p>
+        <button type="button" data-add="planner">Add Large-print weekly planner to cart</button>
+      </li>
+      <li data-wf-item data-price="11" data-name="Tactile dot labels">
+        <h2><a href="shop-item.html?id=labels">Tactile dot labels</a></h2>
+        <p>$11. Pack of 120 raised-dot stickers in six colors.</p>
+        <button type="button" data-add="labels">Add Tactile dot labels to cart</button>
+      </li>
+      <li data-wf-item data-price="42" data-name="Talking kitchen scale">
+        <h2><a href="shop-item.html?id=scale">Talking kitchen scale</a></h2>
+        <p>$42. Speaks the weight aloud. Battery included.</p>
+        <button type="button" data-add="scale">Add Talking kitchen scale to cart</button>
+      </li>
+    </ul>
+    <p><a href="shop-cart.html">Review cart and checkout</a></p>
+  </main>
+  <script src="shop.js"></script>
+  <script>
+    document.querySelector("#under20").addEventListener("click", () => {
+      let shown = 0;
+      document.querySelectorAll("#products li").forEach((item) => {
+        item.hidden = Number(item.dataset.price) >= 20;
+        if (!item.hidden) shown += 1;
+      });
+      document.querySelector("#status").textContent = `Showing only items under $20. ${shown} items. ${wfCartLine()}`;
+    });
+  </script>
+</body>
+</html>

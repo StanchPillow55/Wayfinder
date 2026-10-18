@@ -5,6 +5,7 @@ from __future__ import annotations
 import time
 import uuid
 
+from wayfinder import capabilities, conversation, semantic
 from wayfinder.browser.bridge import BrowserUnavailable
 from wayfinder.browser.families import PageObservation, entry_control, failure_observation, normalize_url
 from wayfinder.contracts import ADR_ID, BOX3_ID, DEVKIT_ID, P4_ID
@@ -27,7 +28,7 @@ from wayfinder.models import (
 from wayfinder.observability import export_event, trace_event
 from wayfinder.policy import decide
 from wayfinder.ranker import rank
-from wayfinder.renderers import glance_payload, grade1_braille, orientation_speech
+from wayfinder.renderers import glance_payload, grade1_braille, narrate_result, orientation_speech
 from wayfinder.router import UnknownCapability, route
 from wayfinder.state import Session, get_runtime, runtime
 from wayfinder.models import Verification
@@ -48,6 +49,12 @@ RISK_LABELS = {
     "irreversible": "Blocked",
 }
 _SUPERSEDE = {"what_is_here", "explain", "compare", "select", "go_back"}
+# Words about the conversation itself are never read as page constraints.
+_NO_CONSTRAINT = {
+    "forget_constraint", "where_was_i", "repeat", "explain_that", "wait", "just_do_it", "mute", "unmute",
+    "set_renderer", "save_project", "continue_project", "set_preference", "reset_preferences", "who_acting",
+    "read_all",
+}
 _DENSITY_DOWN = {"full": "standard", "standard": "brief", "brief": "brief"}
 _DENSITY_UP = {"brief": "standard", "standard": "full", "full": "full"}
 
@@ -56,8 +63,8 @@ class SessionNotFound(Exception):
     """No Mac session matches the id."""
 
 
-def create_session(target: str | None = None, url: str | None = None) -> dict:
-    allowed = {None, "", "fixture", "faq", "search", "form", "unsupported", "public", "url"}
+def create_session(target: str | None = None, url: str | None = None, continue_from: str | None = None) -> dict:
+    allowed = {None, "", "fixture", "faq", "search", "form", "unsupported", "public", "url", "shop", "jobs", "unlabeled"}
     if url and target in {None, ""}:
         target = "url"
     if target not in allowed:
@@ -72,23 +79,44 @@ def create_session(target: str | None = None, url: str | None = None) -> dict:
             raise TopologyError("invalid_url") from exc
     with runtime.lock:
         session = Session()
+        conversation.apply_bank(session)
+        previous = runtime.sessions.get(continue_from or "")
+        if previous is not None:
+            conversation.inherit(session, previous)
         runtime.sessions[session.id] = session
         runtime.active_session_id = session.id
-        if target and target != "fixture":
-            session.browser_target = target
-            try:
-                runtime.browser.open(session.id, target, url)
-                session.mode = "browser"
-            except BrowserUnavailable as exc:
-                session.mode = "fixture"
-                session.browser_target = "fixture"
-                session.fallback_reason = (
-                    f"The browser adapter is unavailable ({exc}). "
-                    "This is the labeled Harbor Line fixture, not the live browser."
-                )
-        else:
-            session.browser_target = "fixture"
+        open_target(session, target, url)
         return _turn(session, "what is here", None, "text")
+
+
+def open_target(session: Session, target: str | None, url: str | None = None) -> None:
+    """Point a session at a page. The task state (goal, path, preferences) is not touched."""
+    session.pending = None
+    session.branches = []
+    session.observation = None
+    session.fallback_reason = ""
+    session.fallback_announced = False
+    if target and target != "fixture":
+        session.browser_target = target
+        try:
+            runtime.browser.open(session.id, target, url)
+            session.mode = "browser"
+        except BrowserUnavailable as exc:
+            session.mode = "fixture"
+            session.browser_target = "fixture"
+            session.fallback_reason = (
+                f"The browser adapter is unavailable ({exc}). "
+                "This is the labeled Harbor Line fixture, not the live browser."
+            )
+    else:
+        session.mode = "fixture"
+        session.browser_target = "fixture"
+
+
+def current_title(session: Session) -> str:
+    if session.mode == "browser" and session.observation is not None:
+        return session.observation.h1 or session.observation.title
+    return "Harbor Line"
 
 
 def handle_turn(
@@ -197,15 +225,17 @@ def _turn(session: Session, text: str | None, action_id: str | None, channel: st
     events: list[dict] = []
     session.last_verification = None
     session.last_decision = None
+    conversation.begin_turn(session)
     if action_id:
         intent = Intent(type="select", text=action_id, action_id=action_id, channel=channel)
     else:
         intent = parse(text or "", session.branches, channel=channel, pending=session.pending is not None)
-        if text:
+        if text and intent.type not in _NO_CONSTRAINT:
             for constraint in constraints_in(text):
                 if constraint not in session.goal.constraints:
                     session.goal.constraints.append(constraint)
                     session.goal.text = text.strip()
+                    conversation.note(session, "constraint", f"Added the {constraint.replace('_', ' ')} constraint")
     _emit(session, events, trace_id, turn_id, "gateway", "parse_intent", "ok", intent=intent.type, channel=channel)
     _emit(
         session,
@@ -237,7 +267,11 @@ def _turn(session: Session, text: str | None, action_id: str | None, channel: st
             confirmation_outcome="confirmed",
             risk_class=control.risk_class,
         )
-        return _commit(session, control, True, turn_id, trace_id, events, channel)
+        conversation.note(session, "confirm", f"You confirmed: {control.label}")
+        view = _commit(session, control, True, turn_id, trace_id, events, channel)
+        if conversation.after_confirm(session, control):
+            view = _view(session)
+        return view
 
     if session.pending and intent.type in {"deny", "stop"}:
         control = session.pending
@@ -271,6 +305,8 @@ def _turn(session: Session, text: str | None, action_id: str | None, channel: st
             confirmation_outcome=outcome,
         )
         _publish(session, events, trace_id, turn_id, "cleared", "Cleared", detach=True)
+        conversation.note(session, "decline", f"You {'declined' if intent.type == 'deny' else 'stopped'}: {control.label}. Nothing was submitted")
+        conversation.pause_goal(session)
         speech = (
             "Stopped. Nothing was submitted. The page is unchanged."
             if intent.type == "stop"
@@ -291,20 +327,36 @@ def _turn(session: Session, text: str | None, action_id: str | None, channel: st
         )
         session.pending = None
 
+    handled = conversation.handle(session, intent, turn_id, trace_id, events, channel)
+    if handled is not None:
+        return handled
     if intent.type == "stop":
         _emit(session, events, trace_id, turn_id, "orchestrator", "stop", "ok")
         _publish(session, events, trace_id, turn_id, "cleared", "Cleared", detach=True)
-        return _finish(session, "Stopped. Your place on the page is unchanged.", turn_id, trace_id, events)
+        conversation.pause_goal(session)
+        conversation.note(session, "stop", "You stopped")
+        conversation.select(session, events, trace_id, turn_id, "orchestrator", "stop: goal and steps kept")
+        return _finish(
+            session,
+            "Stopped. Your place, your goal, and the steps already taken are kept.",
+            turn_id, trace_id, events, meta=True,
+        )
     if intent.type == "confirm":
         return _finish(session, "Nothing is waiting for confirmation.", turn_id, trace_id, events)
     if intent.type == "deny":
         return _finish(session, "Nothing is waiting to cancel.", turn_id, trace_id, events)
     if intent.type == "less_detail":
+        before = session.density
         session.density = _DENSITY_DOWN[session.density]
-        return _reorient(session, turn_id, trace_id, events, "Showing less detail.")
+        conversation.persist_density(session)
+        note = "Already at the shortest detail." if before == session.density else f"Showing less detail. Detail is now {session.density}."
+        return _reorient(session, turn_id, trace_id, events, note)
     if intent.type == "more_detail":
+        before = session.density
         session.density = _DENSITY_UP[session.density]
-        return _reorient(session, turn_id, trace_id, events, "Showing more detail.")
+        conversation.persist_density(session)
+        note = "Already at the fullest detail." if before == session.density else f"Showing more detail. Detail is now {session.density}."
+        return _reorient(session, turn_id, trace_id, events, note)
     if intent.type == "go_back":
         if session.mode == "browser":
             before = session.observation.url if session.observation is not None else ""
@@ -316,6 +368,7 @@ def _turn(session: Session, text: str | None, action_id: str | None, channel: st
                 _emit(session, events, trace_id, turn_id, "orchestrator", "go_back", "rejected", evidence_ref=f"browser:{before}")
                 return _finish(session, "You are already at the start of this page.", turn_id, trace_id, events)
             _emit(session, events, trace_id, turn_id, "orchestrator", "go_back", "ok", evidence_ref=f"browser:{before}")
+            conversation.note(session, "back", "You went back")
             reply = _reorient(session, turn_id, trace_id, events, "Back on the previous page.")
             after = session.observation.url if session.observation is not None else ""
             changed = bool(after) and after != before
@@ -336,6 +389,9 @@ def _turn(session: Session, text: str | None, action_id: str | None, channel: st
         if session.pending:
             speech = f"{session.pending.preview} This still needs confirmation. Say yes or no."
             return _finish(session, speech, turn_id, trace_id, events)
+        if session.goal_plan and session.goal_plan.get("status") in {"paused", "planned", "need_input", "stuck"}:
+            conversation.select(session, events, trace_id, turn_id, "goal_planner", "carry on with the goal")
+            return conversation.advance_goal(session, turn_id, trace_id, events, channel)
         return _reorient(session, turn_id, trace_id, events, "Continuing from the current page.")
     if intent.type == "what_is_here":
         return _reorient(session, turn_id, trace_id, events, "")
@@ -386,7 +442,7 @@ def _reorient(session: Session, turn_id: str, trace_id: str, events: list[dict],
         history_summary=" ".join(session.memory_lines)[-500:],
         density=session.density,
     )
-    branches = rank(snapshot.controls, session.goal.constraints, session.density)
+    branches = rank(snapshot.controls, session.goal.constraints, session.density, session.branch_limit)
     wir.actions = branches
     session.wir = wir
     session.branches = branches
@@ -395,6 +451,9 @@ def _reorient(session: Session, turn_id: str, trace_id: str, events: list[dict],
     summary_control = next(control for control in snapshot.controls if control.capability == "reader.explain")
     # Routing a read shows the registry is in the orientation path. Summarize is the capability.
     chosen = route(_reader_stand_in(summary_control))
+    conversation.select(session, events, trace_id, turn_id, "reader", "read the page")
+    conversation.select(session, events, trace_id, turn_id, "branch_planner", f"{len(branches)} grounded choices", headline=False)
+    conversation.note_page(session, "Harbor Line fixture", "fixture:harbor")
     _emit(
         session,
         events,
@@ -478,6 +537,8 @@ def _commit(
         _emit(session, events, trace_id, turn_id, "router", "select_capability", "rejected", capability=control.capability)
         return _finish(session, "That capability is not in the registry.", turn_id, trace_id, events)
     decision = decide(control, confirmed=confirmed)
+    conversation.select_for_control(session, events, trace_id, turn_id, control, chosen.agent, "harbor")
+    conversation.note_policy(session, events, trace_id, turn_id, decision.decision)
     _emit(
         session,
         events,
@@ -538,6 +599,7 @@ def _commit(
         return _finish(session, f"Denied. {decision.reason}", turn_id, trace_id, events)
     if decision.decision == "REQUIRE_CONFIRMATION":
         session.pending = control
+        conversation.note(session, "confirm", f"Asked you to confirm: {control.label}")
         _emit(
             session,
             events,
@@ -590,6 +652,7 @@ def _commit(
         session.page = new_page
     verification = verify(control, session.page)
     session.last_verification = verification
+    conversation.note_verifier(session, events, trace_id, turn_id, verification.status)
     _emit(
         session,
         events,
@@ -614,7 +677,7 @@ def _commit(
         history_summary=" ".join(session.memory_lines)[-500:],
         density=session.density,
     )
-    branches = rank(snapshot.controls, session.goal.constraints, session.density)
+    branches = rank(snapshot.controls, session.goal.constraints, session.density, session.branch_limit)
     wir.actions = branches
     session.wir = wir
     session.branches = branches
@@ -639,6 +702,7 @@ def _commit(
     )
     if verification.status == "SUCCESS":
         runtime.remember(session, f"{control.label} Verification: SUCCESS.")
+        conversation.note(session, "read" if control.informational else "choice", f"{'Read' if control.informational else 'Chose'}: {control.label} ({verification.status.lower()})")
         token = "action_verified" if result.changed else "orient"
         label = "Verified state change" if result.changed else "Read verified"
         speech = f"Verification: SUCCESS. {orientation_speech(snapshot.summary, branches, session.density)}"
@@ -757,8 +821,10 @@ def _publish(
     )
 
 
-def _finish(session: Session, speech: str, turn_id: str, trace_id: str, events: list[dict]) -> dict:
+def _finish(session: Session, speech: str, turn_id: str, trace_id: str, events: list[dict], *, meta: bool = False) -> dict:
     _emit(session, events, trace_id, turn_id, "renderer", "web_render", "ok")
+    if not meta:
+        session.last_substantive_speech = speech
     session.last_speech = speech
     session.last_events = events
     session.last_turn_id = turn_id
@@ -931,6 +997,10 @@ def _remember_decision(
         "confidence": confidence,
     }
     session.last_decision = record
+    session.last_explained = {
+        **record,
+        "verification": session.last_verification.status if session.last_verification else "not checked yet",
+    }
     _emit(
         session,
         events,
@@ -1074,9 +1144,23 @@ def _browser_snapshot(observation, controls: list[Control]) -> Snapshot:
 def _observe(session: Session) -> PageObservation:
     """Fresh browser read. A crashed or missing page becomes an honest failure, not a guess."""
     try:
-        return runtime.browser.observe(session.id)
+        return _prepare(session, runtime.browser.observe(session.id))
     except Exception as exc:  # noqa: BLE001
         return failure_observation("about:blank", f"The browser page could not be read ({type(exc).__name__}).")
+
+
+def _prepare(session: Session, observation: PageObservation) -> PageObservation:
+    """Apply this session's capability choices to a fresh read. The page itself is untouched."""
+    off = session.capabilities_off
+    observation.specialists_off = frozenset(item for item in off if item in capabilities.FAMILY_TO_ID.values())
+    if "repair_agent" in off:
+        for group in (observation.links, observation.buttons, observation.fields):
+            for item in group:
+                if item.get("inferred"):
+                    item["name"] = ""
+                    item["inferred"] = False
+        observation.links = [item for item in observation.links if item.get("name")]
+    return observation
 
 
 def _enter_text(
@@ -1128,7 +1212,7 @@ def _reorient_browser(session: Session, turn_id: str, trace_id: str, events: lis
         history_summary=" ".join(session.memory_lines)[-500:],
         density=session.density,
     )
-    branches = rank(controls, session.goal.constraints, session.density)
+    branches = rank(controls, session.goal.constraints, session.density, session.branch_limit)
     wir.actions = branches
     session.wir = wir
     session.branches = branches
@@ -1137,6 +1221,9 @@ def _reorient_browser(session: Session, turn_id: str, trace_id: str, events: lis
     _emit(session, events, trace_id, turn_id, "ranker", "rank_branches", "ok", count=len(branches), family=observation.family)
     summary_control = next(control for control in controls if control.capability == "reader.explain")
     chosen = route(_reader_stand_in(summary_control))
+    conversation.select(session, events, trace_id, turn_id, "reader", f"read {observation.h1}"[:90])
+    conversation.select(session, events, trace_id, turn_id, "branch_planner", f"{len(branches)} grounded choices", headline=False)
+    conversation.note_page(session, observation.h1 or observation.title, observation.url)
     _emit(
         session,
         events,
@@ -1219,6 +1306,8 @@ def _commit_browser(
         _emit(session, events, trace_id, turn_id, "router", "select_capability", "rejected", capability=control.capability)
         return _finish(session, "That capability is not in the registry.", turn_id, trace_id, events)
     decision = decide(control, confirmed=confirmed)
+    conversation.select_for_control(session, events, trace_id, turn_id, control, chosen.agent, fresh.family)
+    conversation.note_policy(session, events, trace_id, turn_id, decision.decision)
     _emit(
         session,
         events,
@@ -1282,6 +1371,7 @@ def _commit_browser(
     if decision.decision == "REQUIRE_CONFIRMATION":
         session.pending = control
         session.observation = fresh
+        conversation.note(session, "confirm", f"Asked you to confirm: {control.label}")
         _emit(
             session,
             events,
@@ -1316,7 +1406,9 @@ def _commit_browser(
 
     started = time.perf_counter()
     result, after = runtime.browser.act(session.id, recipe, session.faults)
+    after = _prepare(session, after)
     session.observation = after
+    conversation.note_page(session, after.h1 or after.title, after.url)
     _emit(
         session,
         events,
@@ -1333,8 +1425,12 @@ def _commit_browser(
         dom_ref=recipe.split("=")[0],
         page_url=after.url,
     )
-    verification = verify_browser(control, after)
+    verification = verify_browser(
+        control, after, density=session.density,
+        semantic=capabilities.is_enabled(session.capabilities_off, "semantic_explainer"),
+    )
     session.last_verification = verification
+    conversation.note_verifier(session, events, trace_id, turn_id, verification.status)
     _emit(
         session,
         events,
@@ -1362,7 +1458,7 @@ def _commit_browser(
         history_summary=" ".join(session.memory_lines)[-500:],
         density=session.density,
     )
-    branches = rank(controls, session.goal.constraints, session.density)
+    branches = rank(controls, session.goal.constraints, session.density, session.branch_limit)
     wir.actions = branches
     session.wir = wir
     session.branches = branches
@@ -1387,11 +1483,11 @@ def _commit_browser(
     )
     if verification.status == "SUCCESS":
         runtime.remember(session, f"{control.label} Verification: SUCCESS.")
+        conversation.note(session, "read" if control.informational else "choice", f"{'Read' if control.informational else 'Chose'}: {control.label} ({verification.status.lower()})")
         token = "action_verified" if result.changed else "orient"
         label = "Verified state change" if result.changed else "Read verified"
         lead = _browser_lead(control, recipe, verification, after)
-        options = " ".join(f"{index}. {branch.label}." for index, branch in enumerate(branches, start=1))
-        speech = f"Verification: SUCCESS. {lead} Options: {options}".replace("  ", " ")
+        speech = f"Verification: SUCCESS. {narrate_result(lead, branches, session.density)}".replace("  ", " ")
     else:
         token = "failure"
         label = "Verification failed"
@@ -1448,26 +1544,54 @@ def _view(session: Session) -> dict:
             "risk_label": RISK_LABELS[session.pending.risk_class],
         }
     verification = session.last_verification.model_dump(mode="json") if session.last_verification else None
+    page = _page_view(session, snapshot)
+    repairs = session.observation.repairs if session.mode == "browser" and session.observation is not None else []
+    page["repairs"] = repairs
+    page["semantics"] = _semantics(session)
+    goal = session.goal.model_dump(mode="json")
+    state = semantic.build_state(
+        turn_id=session.last_turn_id,
+        page=page,
+        mode=session.mode,
+        branches=branches,
+        pending=pending,
+        verification=verification,
+        goal=goal,
+        goal_plan=session.goal_plan,
+        journey=session.journey,
+        uncertainty=list(session.wir.uncertainty) if session.wir else [],
+        repairs=repairs,
+        density=session.density,
+        selected=session.selected,
+    )
+    braille = _braille_view(session.last_speech)
+    motor_ran = bool(session.tactile_cue and session.tactile_cue.get("physical_motor_ran"))
+    p4 = runtime.plane.boards[P4_ID]
+    p4_connected = bool(p4.connected and not p4.simulated and not p4.loopback)
+    devices = [runtime.plane.entry(board_id) for board_id in (DEVKIT_ID, BOX3_ID, P4_ID)]
+    compiled = semantic.compile_channels(
+        state=state, speech=session.last_speech, braille=braille, tactile=dict(session.tactile), muted=session.speech_muted
+    )
     return {
         "session_id": session.id,
         "turn_id": session.last_turn_id,
         "trace_id": session.last_trace_id,
         "speech": session.last_speech,
-        "braille": _braille_view(session.last_speech),
+        "braille": braille,
         "wir": session.wir.model_dump(mode="json") if session.wir else None,
         "branches": branches,
         "verification": verification,
         "decision_record": session.last_decision,
         "pending_confirmation": pending,
-        "page": _page_view(session, snapshot),
+        "page": page,
         "tactile": session.tactile,
         **_tactile_demo(session),
-        "devices": [runtime.plane.entry(board_id) for board_id in (DEVKIT_ID, BOX3_ID, P4_ID)],
+        "devices": devices,
         "box3_display": session.box3_display,
         "evidence": list(session.evidence),
         "events": session.last_events,
         "density": session.density,
-        "goal": session.goal.model_dump(mode="json"),
+        "goal": goal,
         "history_summary": " ".join(session.memory_lines),
         "adr": ADR_ID,
         "orchestrator": "mac",
@@ -1475,13 +1599,127 @@ def _view(session: Session) -> dict:
         "target": session.browser_target or "fixture",
         "adapter": "playwright" if session.mode == "browser" else "harbor_fixture",
         "hardware_note": HARDWARE_NOTE,
-        "glance": glance_payload(
-            session.branches,
-            session.observation.h1 if session.mode == "browser" and session.observation is not None else "Harbor Line",
-            session.last_speech,
-            session.pending is not None,
+        "glance": semantic.glance_from_state(state),
+        "semantic_state": state,
+        "compiled": compiled,
+        "channels": semantic.channels_view(
+            renderer=session.renderer,
+            muted=session.speech_muted,
+            status=session.channel_status,
+            plane_channels=runtime.plane.channels(),
+            p4_connected=p4_connected,
         ),
+        "renderer": session.renderer,
+        "speech_muted": session.speech_muted,
+        "capabilities": capabilities.registry_view(session.capabilities_off, session.selected_ids, session.selected),
+        "selected": session.selected,
+        "selections": list(session.selection_log),
+        "goal_plan": conversation.plan_view(session),
+        "journey": list(session.journey[-30:]),
+        "memory": {
+            "session_path": len(session.journey),
+            "project": session.project,
+            "projects": conversation.projects(),
+            "preferences": {
+                "density": session.density,
+                "branch_limit": session.branch_limit,
+                "preferred_channels": list(session.preferred_channels),
+            },
+            "raw_audio_or_video_stored": False,
+            "scope": "Session path, saved projects, and preferences stay on this Mac. No audio or video is ever stored.",
+        },
+        "hardware": semantic.hardware_view(physical_motor_ran=motor_ran, devices=devices, p4_connected=p4_connected),
     }
+
+
+def _semantics(session: Session) -> dict | None:
+    if session.mode != "browser" or session.observation is None or not session.observation.supported:
+        return None
+    if not capabilities.is_enabled(session.capabilities_off, "semantic_explainer"):
+        return {"text": "", "has_semantics": False, "limit": "The Semantic Explainer capability is turned off."}
+    from wayfinder.explain import semantic_explanation
+
+    return semantic_explanation(session.observation, session.observation.controls, session.density)
+
+
+def set_capability(session_id: str, capability_id: str, enabled: bool) -> dict:
+    with runtime.lock:
+        session = _session(session_id)
+        try:
+            entry = capabilities.get(capability_id)
+        except capabilities.UnknownCapabilityId as exc:
+            raise TopologyError("unknown_capability") from exc
+        if entry.kind == "core":
+            raise TopologyError("capability_locked")
+        if enabled:
+            session.capabilities_off.discard(capability_id)
+        else:
+            session.capabilities_off.add(capability_id)
+        if session.observation is not None:
+            session.observation.specialists_off = frozenset(
+                item for item in session.capabilities_off if item in capabilities.FAMILY_TO_ID.values()
+            )
+        conversation.note(session, "capability", f"{entry.name} turned {'on' if enabled else 'off'}")
+        return _view(session)
+
+
+def set_renderer(session_id: str, renderer: str) -> dict:
+    with runtime.lock:
+        session = _session(session_id)
+        if renderer not in semantic.RENDERERS:
+            raise TopologyError("unknown_renderer")
+        text = conversation.set_renderer(session, renderer)
+        # Status only. The goal, the path, the pending confirmation, and the branches are untouched.
+        session.last_speech = text
+        conversation.select(session, [], session.last_trace_id or "renderer", session.last_turn_id or "renderer", "orchestrator", f"output switched to {renderer}")
+        return _view(session)
+
+
+def set_preferences(session_id: str, speech_muted: bool | None, density: str | None, branch_limit: int | None) -> dict:
+    with runtime.lock:
+        session = _session(session_id)
+        if speech_muted is not None:
+            session.speech_muted = speech_muted
+        if density is not None:
+            if density not in {"brief", "standard", "full"}:
+                raise TopologyError("invalid_payload")
+            session.density = density  # type: ignore[assignment]
+            conversation.persist_density(session)
+        if branch_limit is not None:
+            if branch_limit not in {3, 5}:
+                raise TopologyError("invalid_payload")
+            session.branch_limit = branch_limit
+            runtime.memory.set_preference("branch_limit", str(branch_limit))
+        return _view(session)
+
+
+def set_channel_status(session_id: str, mic: str | None, camera: str | None) -> dict:
+    """Status words only ('armed', 'muted', 'off'). No audio or video ever reaches the Mac."""
+    allowed = {"available", "armed", "muted", "off", "blocked", "unsupported"}
+    with runtime.lock:
+        session = _session(session_id)
+        for name, value in (("mic", mic), ("camera", camera)):
+            if value is None:
+                continue
+            if value not in allowed:
+                raise TopologyError("invalid_payload")
+            session.channel_status[name] = value
+        return _view(session)
+
+
+def save_project(session_id: str, name: str) -> dict:
+    with runtime.lock:
+        session = _session(session_id)
+        session.last_speech = conversation.save_project(session, name)
+        return _view(session)
+
+
+def continue_project(session_id: str, name: str) -> dict:
+    with runtime.lock:
+        session = _session(session_id)
+        turn_id, trace_id = uuid.uuid4().hex, uuid.uuid4().hex
+        conversation.begin_turn(session)
+        return conversation.continue_project(session, name, turn_id, trace_id, [])
 
 
 _install_board_callback()

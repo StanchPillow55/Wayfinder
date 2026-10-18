@@ -35,6 +35,16 @@ TARGET_WORDS: dict[str, str] = {
     "form": "form",
     "room form": "form",
     "room request": "form",
+    "shop": "shop",
+    "store": "shop",
+    "shopping": "shop",
+    "commerce": "shop",
+    "jobs": "jobs",
+    "careers": "jobs",
+    "job board": "jobs",
+    "unlabeled": "unlabeled",
+    "help desk": "unlabeled",
+    "repair": "unlabeled",
 }
 
 _NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "1": 1, "2": 2, "3": 3, "4": 4, "5": 5}
@@ -60,7 +70,30 @@ _CONFIRM = {"confirm", "select", "select this", "choose this", "choose it", "thi
 _YES = {"yes", "do it", "go ahead", "confirmed"}
 _NO = {"no", "nope", "deny", "dont", "do not"}
 _READ = {"read", "read it", "read this", "read page", "read aloud", "read again", "repeat"}
-_PASS_THROUGH = {"less detail", "more detail", "explain", "compare", "continue"}
+_PASS_THROUGH = {
+    "less detail", "more detail", "explain", "compare", "continue",
+    # Interruptions and memory. The session decides what each one does.
+    "wait", "hold on", "pause", "what did you just say", "say that again", "explain that",
+    "read everything", "forget that constraint", "just do it for me", "just do it",
+    "where was i", "who is acting", "mute", "unmute", "mute audio", "unmute audio",
+    "reset my preferences", "fewer options", "more options",
+    "switch to visual", "switch to audio", "switch to braille", "switch to tactile", "switch to hands free",
+}
+_GOAL = (
+    re.compile(r"^(?:actually|instead|new priority)\b.+$"),
+    re.compile(r"^(?:my goal is|goal|i want to|i need to|i want|i need|i would like to|id like to|help me)\b.+$"),
+    re.compile(r"^(?:request|reserve|book|apply for|buy|order|purchase|add|take me|review)\b.+$"),
+)
+_PROJECT = (
+    re.compile(r"^(?:save|name)(?: this| my| the)?(?: project| workspace| search| task)? (?:as|called|named) [a-z0-9 ]{2,60}$"),
+    re.compile(r"^(?:continue|resume|reopen|pick up)(?: with)?(?: my| the)?(?: project| workspace)? [a-z0-9 ]{2,60}$"),
+)
+_FORGET = re.compile(r"^forget (?:the |my )?[a-z$0-9 -]{2,40} constraint$")
+_OPEN_ADDRESS = {"open address", "open the address", "open the typed address", "open the address i typed", "go to the address", "go to the typed address"}
+_URL_OPEN = re.compile(
+    r"^(?:open|go to|visit|load)(?: the)?(?: website| site| address| url| page)? (?P<u>[a-z0-9][a-z0-9 .\-/]*)$"
+)
+_URL_SHAPE = re.compile(r"^[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:/[a-z0-9._~%/-]*)?$")
 
 _ENTER = (
     re.compile(r"^(?:search|find|look up)(?: for)? .+$"),
@@ -75,7 +108,7 @@ class VoiceCommand:
     """What a spoken phrase means.
 
     kind is one of: stop, help, describe, next, previous, back, confirm, yes, no,
-    read, enter, open, number, command, rejected, unknown.
+    read, enter, goal, open, open_url, open_address, number, command, rejected, unknown.
     ``text`` is the normalized phrase to POST for kinds that go to the session
     (describe, back, no, enter, command). ``target`` is a session target for open.
     """
@@ -84,6 +117,7 @@ class VoiceCommand:
     text: str = ""
     target: str | None = None
     number: int | None = None
+    url: str | None = None
 
 
 def normalize(raw: str) -> str:
@@ -91,6 +125,25 @@ def normalize(raw: str) -> str:
     lowered = lowered.replace("'", "")
     lowered = re.sub(r"[?!.,;:]+", "", lowered)
     return re.sub(r"\s+", " ", lowered).strip()
+
+
+def spoken_url(raw: str) -> str | None:
+    """'open example dot org slash docs' or 'open example.org' -> 'https://example.org/docs'.
+
+    Only a plain host-shaped word list with a dot becomes an address. The web layer still
+    runs it through the same http(s) check as a typed address.
+    """
+    lowered = raw.strip().lower()
+    match = _URL_OPEN.match(lowered)
+    if not match:
+        return None
+    text = match.group("u").strip()
+    text = re.sub(r"\s+dot\s+", ".", text)
+    text = re.sub(r"\s+slash\s+", "/", text)
+    text = re.sub(r"\s*\.\s*", ".", text).replace(" ", "")
+    if not _URL_SHAPE.match(text):
+        return None
+    return "https://" + text
 
 
 def is_injection(normalized: str) -> bool:
@@ -130,6 +183,15 @@ def parse_voice(raw: str) -> VoiceCommand:
         target = TARGET_WORDS.get(opened.group("t").strip())
         if target:
             return VoiceCommand("open", target=target)
+    if n in _OPEN_ADDRESS:
+        return VoiceCommand("open_address")
+    address = spoken_url(raw)
+    if address:
+        return VoiceCommand("open_url", url=address)
+    if any(pattern.match(n) for pattern in _PROJECT) or _FORGET.match(n):
+        return VoiceCommand("command", text=n[:120])
+    if any(pattern.match(n) for pattern in _GOAL):
+        return VoiceCommand("goal", text=n[:200])
     if any(pattern.match(n) for pattern in _ENTER):
         return VoiceCommand("enter", text=n[:200])
     number = _NUMBER.match(n)

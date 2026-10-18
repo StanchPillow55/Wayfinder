@@ -29,6 +29,9 @@ TARGETS = {
     "search": "city-services.html",
     "form": "room-request.html",
     "unsupported": "market-poster.html",
+    "shop": "shop.html",
+    "jobs": "jobs.html",
+    "unlabeled": "unlabeled.html",
 }
 # A public page is a best-effort extra. The browser may fail to reach it.
 PUBLIC_URL = "https://www.w3.org/WAI/fundamentals/accessibility-intro/"
@@ -38,6 +41,12 @@ CONSEQUENTIAL_WORDS = ("pay", "buy", "purchase", "delete", "order", "donate", "c
 FALLBACK_NOTE = "A local FAQ, search, or form page can still be opened through the browser."
 # Blockers are structural: a network failure, an HTTP status, a sign-in form, or a challenge page.
 BLOCKERS = ("unreachable", "login", "captcha", "http_error")
+
+# Specialist agents (capabilities.py) own these families. A mirror page marks itself with
+# data-wf-mirror, and the bridge trusts that marker only on pages this app serves.
+# Adding a specialist: add a family here, a _plan_<family> below, and a capability entry.
+SPECIALIST_FAMILIES = {"commerce": "commerce_agent", "jobs": "jobs_agent"}
+INFERRED_NOTE = "Name inferred from nearby visible text. The live page was not changed."
 
 
 def normalize_url(raw: str | None) -> str:
@@ -85,6 +94,30 @@ class PageObservation:
     error: str = ""
     blocker: str = ""
     notes: list[str] = field(default_factory=list)
+    landmarks: list[dict] = field(default_factory=list)
+    items: list[dict] = field(default_factory=list)
+    mirror: str = ""
+    base_family: str = ""
+    fulltext: str = ""
+    # Specialist capabilities the person has turned off. The orchestrator fills this per session.
+    specialists_off: frozenset = frozenset()
+
+    @property
+    def repairs(self) -> list[dict]:
+        """Controls whose accessible name was inferred. A read-only overlay, never a page edit."""
+        found: list[dict] = []
+        for kind, group in (("link", self.links), ("button", self.buttons), ("field", self.fields)):
+            for item in group:
+                if item.get("inferred") and item.get("name") and not item.get("hidden"):
+                    found.append({
+                        "kind": kind,
+                        "ref": f"{kind}:{item.get('index')}",
+                        "inferred_name": str(item.get("name"))[:80],
+                        "source": str(item.get("name_source") or "nearby text"),
+                        "sensitive": bool(item.get("sensitive")),
+                        "note": INFERRED_NOTE,
+                    })
+        return found[:12]
 
     @property
     def controls(self) -> list[Control]:
@@ -104,12 +137,15 @@ class PageObservation:
             items.append({"kind": "question", "ref": f"details:{item.get('index')}", "text": f"{str(item.get('summary'))[:100]} ({state})"})
         for item in self.links[:10]:
             hidden = " (hidden)" if item.get("hidden") else ""
-            items.append({"kind": "link", "ref": f"link:{item.get('index')}", "text": f"{str(item.get('name'))[:80]} -> {item.get('href')}{hidden}"})
+            guess = " (inferred name)" if item.get("inferred") else ""
+            items.append({"kind": "link", "ref": f"link:{item.get('index')}", "text": f"{str(item.get('name'))[:80]}{guess} -> {item.get('href')}{hidden}"})
         for item in self.buttons[:6]:
-            items.append({"kind": "button", "ref": f"button:{item.get('index')}", "text": str(item.get("name"))[:80]})
+            guess = " (inferred name)" if item.get("inferred") else ""
+            items.append({"kind": "button", "ref": f"button:{item.get('index')}", "text": f"{str(item.get('name'))[:80]}{guess}"})
         for item in self.fields[:8]:
             value = "[redacted]" if item.get("sensitive") else str(item.get("value"))[:60]
-            items.append({"kind": f"field:{item.get('type')}", "ref": f"field:{item.get('index')}", "text": f"{str(item.get('name'))[:60]} = {value or 'empty'}"})
+            guess = " (inferred name)" if item.get("inferred") else ""
+            items.append({"kind": f"field:{item.get('type')}", "ref": f"field:{item.get('index')}", "text": f"{str(item.get('name'))[:60]}{guess} = {value or 'empty'}"})
         if self.status:
             items.append({"kind": "status", "ref": "[role=status]", "text": self.status[:120]})
         return items
@@ -215,6 +251,10 @@ def observe_from_dom(raw: dict, url: str, *, version: int = 1, focus: int | None
         family = "docs"
     else:
         family = "unsupported"
+    base_family = family
+    mirror = str(raw.get("mirror") or "")
+    if mirror in SPECIALIST_FAMILIES:
+        family = mirror
     open_details = [item for item in details if item.get("open")]
     if focus is not None:
         # The question the person just opened leads, even if another one was already open.
@@ -235,6 +275,11 @@ def observe_from_dom(raw: dict, url: str, *, version: int = 1, focus: int | None
     compare_pair = [str(item.get("name")) for item in visible_links[:2]]
     if len(compare_pair) < 2 and len(details) >= 2:
         compare_pair = [str(item.get("summary")) for item in details[:2]]
+    page_items = [item for item in (raw.get("items") or []) if item.get("name")]
+    if mirror in SPECIALIST_FAMILIES and len(page_items) >= 2:
+        compare_pair = [str(item.get("name")) for item in page_items[:2]]
+    if mirror in SPECIALIST_FAMILIES and page_items and base_family != "form":
+        topics = [str(item.get("name")) for item in page_items] or topics
     query = str(search_fields[0].get("value") or "") if search_fields else ""
     if search_fields and not query:
         # A results page often empties the box and keeps the term in the address.
@@ -273,6 +318,17 @@ def observe_from_dom(raw: dict, url: str, *, version: int = 1, focus: int | None
             facts["sections"] = "; ".join(sections)
             summary += f" Sections: {', '.join(sections)}."
         summary += f" Links: {names}."
+    elif family in SPECIALIST_FAMILIES:
+        raw_items = [item for item in (raw.get("items") or []) if item.get("name")]
+        names = ", ".join(str(item.get("name")) for item in raw_items[:5])
+        noun = "Products" if family == "commerce" else "Roles"
+        summary = f"{h1}. {purpose.rstrip('.')}."
+        if raw_items:
+            summary += f" {noun if len(raw_items) > 1 else 'Item'}: {names}."
+        if status:
+            summary += f" Status: {status.rstrip('.')}."
+        if base_family == "form" and not names:
+            summary += f" Fields: {', '.join(topics)}."
     else:
         summary = (
             f"This page is not a supported FAQ, search, or form. Title: {h1}. "
@@ -302,6 +358,11 @@ def observe_from_dom(raw: dict, url: str, *, version: int = 1, focus: int | None
         untrusted=untrusted,
         html=str(raw.get("html") or "")[:60000],
         notes=notes,
+        landmarks=list(raw.get("landmarks") or []),
+        items=page_items[:12],
+        mirror=mirror if mirror in SPECIALIST_FAMILIES else "",
+        base_family=base_family,
+        fulltext=str(raw.get("fulltext") or excerpt)[:6000],
     )
 
 
@@ -417,15 +478,29 @@ def _control(
     )
 
 
+def _shown(item: dict, text: str | None = None) -> str:
+    """A control's spoken name. An inferred name says so, so nobody mistakes a guess for the page's own label."""
+    name = text if text is not None else str(item.get("name"))
+    return f"{name} (inferred name)" if item.get("inferred") else name
+
+
 def _follow_control(stamp: str, link: dict, *, priority: int, noun: str) -> Control:
     name = str(link.get("name"))
     path = str(link.get("path") or "")
     tail = path.rstrip("/").split("/")[-1] or path
+    query = urlparse(str(link.get("abs") or "")).query
+    if query:
+        tail = f"{tail}?{query}"
+    guess = bool(link.get("inferred"))
     return _control(
         stamp=stamp,
         control_id=f"open-{noun}-{_slug(name)}",
-        label=f"Open {name[:80]}",
-        rationale=f"Shown because this {noun} is on the page.",
+        label=f"Open {_shown(link, name[:80])}",
+        rationale=(
+            f"Shown because this {noun} is on the page. Its name was {INFERRED_NOTE.lower()}"
+            if guess
+            else f"Shown because this {noun} is on the page."
+        ),
         capability="browser.navigate",
         risk="reversible_write",
         recipe=f"follow:{link.get('index')}",
@@ -453,13 +528,22 @@ def plan(observation: PageObservation) -> list[Control]:
     ]
     if not observation.supported:
         return controls
-    if observation.family == "faq":
+    family = observation.family
+    if family in SPECIALIST_FAMILIES and SPECIALIST_FAMILIES[family] in observation.specialists_off:
+        family = observation.base_family or "docs"
+    if family == "commerce":
+        controls.extend(_plan_commerce(observation))
+    elif family == "jobs":
+        controls.extend(_plan_jobs(observation))
+    elif family == "faq":
         controls.extend(_plan_faq(observation))
-    elif observation.family == "search":
+    elif family == "search":
         controls.extend(_plan_search(observation))
-    elif observation.family == "form":
+    elif family == "form":
         controls.extend(_plan_form(observation))
-    elif observation.family == "docs":
+        for order, link in enumerate(followable_links(observation)[:2]):
+            controls.append(_follow_control(stamp, link, priority=52 - order, noun="link"))
+    elif family == "docs":
         if observation.facts.get("sections"):
             controls.append(
                 _control(
@@ -680,7 +764,7 @@ def _plan_search(observation: PageObservation) -> list[Control]:
             _control(
                 stamp=stamp,
                 control_id=f"filter-{_slug(name)}",
-                label=name,
+                label=_shown(filter_button, name),
                 rationale="Shown because this filter button is on the page.",
                 capability="browser.filter",
                 risk="reversible_write",
@@ -777,7 +861,7 @@ def _plan_form(observation: PageObservation) -> list[Control]:
             _control(
                 stamp=stamp,
                 control_id="submit-form",
-                label=str(submit.get("name") or "Submit"),
+                label=_shown(submit, str(submit.get("name") or "Submit")),
                 rationale="Shown because the form has a submit button. Submission needs confirmation.",
                 capability="browser.submit",
                 risk="consequential",
@@ -787,6 +871,151 @@ def _plan_form(observation: PageObservation) -> list[Control]:
                 priority=45,
             )
         )
+    return controls
+
+
+_ADD_BUTTON = re.compile(r"^\s*add\b", re.IGNORECASE)
+_CART_LINK = re.compile(r"cart|checkout|basket|review", re.IGNORECASE)
+_APPLY_LINK = re.compile(r"appl(y|ication)", re.IGNORECASE)
+
+
+def _bump(controls: list[Control], control_id: str, priority: int) -> list[Control]:
+    return [control.model_copy(update={"priority": priority}) if control.id == control_id else control for control in controls]
+
+
+def _list_items_control(observation: PageObservation, noun: str) -> Control | None:
+    if not observation.items:
+        return None
+    return _control(
+        stamp=observation.stamp,
+        control_id=f"list-{noun}",
+        label=f"List the {noun}",
+        rationale=f"Shown because this page lists {noun}.",
+        capability="reader.topics",
+        risk="read",
+        recipe="topics",
+        expected={"items_listed": True},
+        preview=f"This reads the {noun} on the page without opening one.",
+        priority=70,
+    )
+
+
+def _compare_items_control(observation: PageObservation, noun: str) -> Control | None:
+    if len(observation.compare_pair) < 2:
+        return None
+    first, second = observation.compare_pair[:2]
+    return _control(
+        stamp=observation.stamp,
+        control_id=f"compare-{noun}",
+        label=f"Compare {first} and {second}",
+        rationale=f"Shown because at least two {noun} are visible.",
+        capability="reader.compare",
+        risk="read",
+        recipe="compare",
+        expected={"compared": True},
+        preview=f"This compares {first} and {second} without opening them.",
+        priority=64,
+    )
+
+
+def add_controls(observation: PageObservation) -> list[Control]:
+    """One reversible 'add to cart' control per add button. Used by the shop planner and by goals."""
+    found: list[Control] = []
+    for item in observation.buttons:
+        name = str(item.get("name"))
+        if not _ADD_BUTTON.match(name) or item.get("disabled") or item.get("type") == "submit":
+            continue
+        product = re.sub(r"\s+to\s+(?:the\s+)?cart\s*$", "", re.sub(r"^\s*add\s+", "", name, flags=re.IGNORECASE), flags=re.IGNORECASE).strip() or "item"
+        found.append(
+            _control(
+                stamp=observation.stamp,
+                control_id=f"add-{_slug(product)}",
+                label=_shown(item, name),
+                rationale="Shown because this page has an add button. Adding changes the demo cart only. No payment exists here.",
+                capability="browser.filter",
+                risk="reversible_write",
+                recipe=f"filter:{item.get('index')}",
+                expected={"status_has": f"added {product}"},
+                preview=f"This adds {product} to the demo cart. It does not check out and nothing is paid.",
+                priority=68,
+            )
+        )
+    return found
+
+
+def _plan_commerce(observation: PageObservation) -> list[Control]:
+    """Local shop mirror: browse, compare, add, review. Adding is reversible. Checkout waits for yes."""
+    stamp = observation.stamp
+    controls: list[Control] = []
+    listed = _list_items_control(observation, "products")
+    if listed:
+        controls.append(listed)
+    adds = add_controls(observation)
+    if adds:
+        controls.append(adds[0])
+    page_filter = next(
+        (
+            item for item in observation.buttons
+            if observation.status and item.get("type") == "button" and not item.get("disabled")
+            and any(word in str(item.get("name", "")).lower() for word in ("only", "filter"))
+        ),
+        None,
+    )
+    if page_filter:
+        name = str(page_filter.get("name"))
+        controls.append(
+            _control(
+                stamp=stamp,
+                control_id=f"filter-{_slug(name)}",
+                label=_shown(page_filter, name),
+                rationale="Shown because this filter button is on the page.",
+                capability="browser.filter",
+                risk="reversible_write",
+                recipe=f"filter:{page_filter.get('index')}",
+                expected={"status_has": name.lower()},
+                preview=f"This applies the page control “{name}”. It does not add anything to the cart.",
+                priority=71,
+            )
+        )
+    compare = _compare_items_control(observation, "products")
+    if compare:
+        controls.append(compare)
+    cart_link = next((link for link in followable_links(observation) if _CART_LINK.search(str(link.get("name")))), None)
+    if cart_link:
+        controls.append(_follow_control(stamp, cart_link, priority=66, noun="link"))
+    others = [link for link in followable_links(observation) if link is not cart_link]
+    for order, link in enumerate(others[:2]):
+        controls.append(_follow_control(stamp, link, priority=67 - order * 9, noun="product" if observation.items else "link"))
+    if observation.fields and any(item.get("type") == "submit" for item in observation.buttons):
+        controls.extend(_bump(_plan_form(observation), "submit-form", 69))
+    return controls
+
+
+def _plan_jobs(observation: PageObservation) -> list[Control]:
+    """Local jobs mirror: search roles, open one, review an application. Sending waits for yes."""
+    stamp = observation.stamp
+    controls: list[Control] = []
+    if any(item.get("type") == "search" for item in observation.fields):
+        controls.extend(
+            control for control in _plan_search(observation)
+            if control.id != "compare-results" and not control.id.startswith("open-result-")
+        )
+    listed = _list_items_control(observation, "roles")
+    if listed:
+        controls.append(listed)
+    compare = _compare_items_control(observation, "roles")
+    if compare:
+        controls.append(compare)
+    links = followable_links(observation)
+    apply_link = next((link for link in links if _APPLY_LINK.search(str(link.get("name")))), None)
+    if apply_link:
+        controls.append(_follow_control(stamp, apply_link, priority=67, noun="link"))
+    for order, link in enumerate([link for link in links if link is not apply_link][:2]):
+        controls.append(_follow_control(stamp, link, priority=66 - order * 8, noun="role" if observation.items else "link"))
+    if observation.fields and any(item.get("type") == "submit" for item in observation.buttons) and not any(
+        item.get("type") == "search" for item in observation.fields
+    ):
+        controls.extend(_bump(_plan_form(observation), "submit-form", 69))
     return controls
 
 

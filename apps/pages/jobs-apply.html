@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Review your application (local mirror)</title>
+</head>
+<body data-wf-mirror="jobs">
+  <main>
+    <h1>Review your application</h1>
+    <p>Check the role, add your name, then send the demo application. Nothing is sent to an employer.</p>
+    <ul>
+      <li data-wf-item id="role-line"><h2 id="role-title">Role</h2></li>
+    </ul>
+    <form id="application">
+      <label for="applicant">Applicant name</label>
+      <input id="applicant" name="applicant" type="text" autocomplete="name">
+      <label for="note">Cover note</label>
+      <textarea id="note" name="note"></textarea>
+      <button id="send" type="submit">Send application (demo)</button>
+    </form>
+    <p id="status" role="status">Application not sent yet.</p>
+    <p><a href="jobs.html">Back to all roles</a></p>
+  </main>
+  <script src="jobs.js"></script>
+  <script>
+    const role = WF_ROLES[new URLSearchParams(location.search).get("id")];
+    const title = role ? role.title : "No role chosen";
+    document.querySelector("#role-title").textContent = `Applying for: ${title}`;
+    document.querySelector("#role-line").dataset.name = title;
+    document.querySelector("#application").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const name = document.querySelector("#applicant").value.trim();
+      const status = document.querySelector("#status");
+      if (!role || !name) {
+        status.textContent = "A role and a name are required. Application not sent.";
+        return;
+      }
+      status.textContent = `Application submitted for ${role.title}. Demo only: nothing was sent to an employer.`;
+    });
+  </script>
+</body>
+</html>

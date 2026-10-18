@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Community jobs board (local mirror)</title>
+</head>
+<body data-wf-mirror="jobs">
+  <main>
+    <h1>Community jobs board</h1>
+    <p>A local practice board for open roles. Nothing you do here is sent to an employer.</p>
+    <form id="search-form" role="search">
+      <label for="q">Search roles</label>
+      <input id="q" name="q" type="search" placeholder="remote">
+      <button type="submit">Search</button>
+    </form>
+    <button type="button" id="remote-only">Only remote roles</button>
+    <p id="status" role="status">All roles.</p>
+    <ul id="roles">
+      <li data-wf-item data-name="Library page assistant" data-remote="false">
+        <h2><a href="job.html?id=assistant">Library page assistant</a></h2>
+        <p>Harbor Branch, on site. $19 per hour.</p>
+      </li>
+      <li data-wf-item data-name="Braille transcription trainee" data-remote="true">
+        <h2><a href="job.html?id=transcriber">Braille transcription trainee</a></h2>
+        <p>Remote. $22 per hour.</p>
+      </li>
+      <li data-wf-item data-name="Community tech helper" data-remote="true">
+        <h2><a href="job.html?id=helper">Community tech helper</a></h2>
+        <p>Remote or Harbor Branch. $24 per hour.</p>
+      </li>
+    </ul>
+  </main>
+  <script>
+    const items = () => document.querySelectorAll("#roles li");
+    const status = document.querySelector("#status");
+    const count = () => [...items()].filter((item) => !item.hidden).length;
+    document.querySelector("#search-form").addEventListener("submit", (event) => {
+      event.preventDefault();
+      const query = document.querySelector("#q").value.trim().toLowerCase();
+      items().forEach((item) => {
+        const haystack = `${item.innerText} ${item.dataset.remote === "true" ? "remote" : "on site"}`.toLowerCase();
+        item.hidden = Boolean(query) && !haystack.includes(query);
+      });
+      status.textContent = query ? `Results for ${query}. ${count()} roles.` : "All roles.";
+    });
+    document.querySelector("#remote-only").addEventListener("click", () => {
+      items().forEach((item) => { item.hidden = item.dataset.remote !== "true"; });
+      status.textContent = `Showing only remote roles. ${count()} roles.`;
+    });
+  </script>
+</body>
+</html>

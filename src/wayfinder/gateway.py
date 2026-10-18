@@ -32,7 +32,63 @@ _WHAT_IS_HERE = {
 _CONFIRM = {"yes", "confirm", "do it", "go ahead", "submit"}
 _DENY = {"no", "nope", "deny", "don't", "do not", "do not do that"}
 _STOP = {"stop", "cancel", "never mind", "nevermind"}
-_INJECTION_MARKERS = ("ignore previous instructions", "ignore all previous")
+_INJECTION_MARKERS = (
+    "ignore previous instructions",
+    "ignore all previous",
+    "ignore the above",
+    "disregard previous",
+    "disregard all previous",
+    "system prompt",
+)
+
+_WAIT = {"wait", "hold on", "pause", "one moment", "wait a moment", "wait please"}
+_REPEAT = {"what did you just say", "say that again", "what was that", "repeat that", "what did you say"}
+_EXPLAIN_THAT = {"explain that", "why did you do that", "why that", "why did you choose that", "why"}
+_READ_ALL = {"read everything", "read it all", "read all", "read everything to me"}
+_JUST_DO_IT = {"just do it for me", "just do it", "do it for me", "you do it", "you do it for me", "take care of it"}
+_WHERE_WAS_I = {
+    "where was i", "where was i before", "what did i do", "show my path", "my path", "my history",
+    "history", "show my history", "where have i been", "journey",
+}
+_MUTE = {"mute", "mute audio", "mute speech", "audio off", "speech off", "turn audio off", "silence audio"}
+_UNMUTE = {"unmute", "unmute audio", "unmute speech", "audio on", "speech on", "turn audio on"}
+_WHO = {"who is acting", "which capability", "what capability", "which capability is acting", "who is working"}
+_RENDERERS = {
+    "visual": "visual",
+    "screen": "visual",
+    "audio": "audio",
+    "speech": "audio",
+    "tactile": "tactile",
+    "braille": "tactile",
+    "hands free": "hands_free",
+    "handsfree": "hands_free",
+    "hands-free": "hands_free",
+}
+_RENDERER = re.compile(
+    r"^(?:(?:switch|change)(?: the)?(?: renderer| output)?(?: to)?|use|go to)\s+(?P<r>visual|screen|audio|speech|tactile|braille|hands free|handsfree|hands-free)(?: mode| output)?$"
+)
+_SAVE_PROJECT = (
+    re.compile(r"^(?:save|name)(?: this| my| the)?(?: project| workspace| search| task)? (?:as|called|named) (?P<n>[a-z0-9 ]{2,60})$"),
+    re.compile(r"^(?:save|name)(?: this| my| the)? (?:project|workspace|search|task) (?P<n>[a-z0-9 ]{2,60})$"),
+)
+_CONTINUE_PROJECT = re.compile(
+    r"^(?:continue|resume|reopen|pick up)(?: with)?(?: my| the)?(?: project| workspace)?\s+(?P<n>[a-z0-9 ]{2,60})$"
+)
+_FORGET = re.compile(r"^(?:forget|drop|remove|clear)(?: that| the| my)?(?: (?P<n>[a-z$0-9 -]{2,40}?))?(?: constraint| preference)$")
+_LIMIT = re.compile(r"^(?:show|give me|use|limit(?: options)? to|only)(?: me)?(?: about| just)?\s+(?P<n>3|three|5|five)(?: options| choices| branches)?$")
+_FEWER = {"fewer options", "fewer choices", "shorter list", "fewer branches"}
+_MOREOPT = {"more options", "more choices", "longer list", "more branches"}
+_PREFER = re.compile(r"^(?:i )?prefer (?P<c>audio|speech|braille|tactile|visual|screen|voice|keyboard|camera|switches)$")
+_RESET_PREFS = {"reset my preferences", "reset preferences", "forget my preferences"}
+_GOAL_PREFIX = re.compile(
+    r"^(?:(?P<interrupt>actually|instead|new priority|my new priority is)[:,]?\s*)?"
+    r"(?:my goal is|goal:?|i want to|i need to|i would like to|i'd like to|id like to|i want|i need|help me(?: to)?|can you|please)\s+(?P<g>.+)$"
+)
+_INTERRUPT_ONLY = re.compile(r"^(?P<interrupt>actually|instead|new priority|my new priority is)[:,]?\s+(?P<g>.+)$")
+_GOAL_VERB = re.compile(
+    r"^(?:find|request|reserve|book|apply|buy|order|purchase|add|put|take me|go to the|review|visit)\b.+$"
+)
+_GOAL_QUESTION = re.compile(r"^(?:show me|tell me|what are|what is the|when is|when are|where is|who is|how do i|how much)\b.+$")
 
 
 def _is_injection(normalized: str) -> bool:
@@ -134,6 +190,9 @@ def parse(text: str, branches: list[Control], *, channel: str = "text", pending:
 
     if normalized in _STOP or normalized.startswith("stop"):
         return Intent(type="stop", text=raw, channel=channel)
+    meta = _meta(raw, normalized, channel)
+    if meta is not None:
+        return meta
     if normalized in _CONFIRM:
         return Intent(type="confirm", text=raw, channel=channel)
     if normalized in _DENY:
@@ -161,6 +220,14 @@ def parse(text: str, branches: list[Control], *, channel: str = "text", pending:
     if selection is not None:
         return Intent(type="select", text=raw, selection=selection, channel=channel)
 
+    # A stated outcome. A label that names a current option still wins. Search and typed
+    # entries keep their own grammar below.
+    if _GOAL_VERB.match(normalized) and not normalized.startswith(("search ", "look up")):
+        exact = next((b for b in branches if b.label.lower() == normalized or b.label.lower() in normalized), None)
+        if exact is not None:
+            return Intent(type="select", text=raw, action_id=exact.id, channel=channel)
+        return Intent(type="set_goal", text=raw, channel=channel)
+
     entry = _entry(raw)
     if entry is not None and entry[1]:
         return Intent(type="enter_text", text=raw, channel=channel, field=entry[0], value=entry[1][:120])
@@ -170,10 +237,70 @@ def parse(text: str, branches: list[Control], *, channel: str = "text", pending:
         return Intent(type="ambiguous", text=raw, channel=channel)
     if isinstance(matched, str):
         return Intent(type="select", text=raw, action_id=matched, channel=channel)
+    if _GOAL_QUESTION.match(normalized):
+        return Intent(type="set_goal", text=raw, channel=channel)
 
     if pending and normalized in {"cancel that"}:
         return Intent(type="deny", text=raw, channel=channel)
     return Intent(type="unknown", text=raw, channel=channel)
+
+
+def _meta(raw: str, normalized: str, channel: str) -> Intent | None:
+    """Interruptions, memory, goals, and output switches. None of these touch a page directly."""
+    if normalized in _WAIT:
+        return Intent(type="wait", text=raw, channel=channel)
+    if normalized in _REPEAT:
+        return Intent(type="repeat", text=raw, channel=channel)
+    if normalized in _EXPLAIN_THAT:
+        return Intent(type="explain_that", text=raw, channel=channel)
+    if normalized in _READ_ALL:
+        return Intent(type="read_all", text=raw, channel=channel)
+    if normalized in _JUST_DO_IT:
+        return Intent(type="just_do_it", text=raw, channel=channel)
+    if normalized in _WHERE_WAS_I:
+        return Intent(type="where_was_i", text=raw, channel=channel)
+    if normalized in _MUTE:
+        return Intent(type="mute", text=raw, channel=channel)
+    if normalized in _UNMUTE:
+        return Intent(type="unmute", text=raw, channel=channel)
+    if normalized in _WHO:
+        return Intent(type="who_acting", text=raw, channel=channel)
+    if normalized in _RESET_PREFS:
+        return Intent(type="reset_preferences", text=raw, channel=channel)
+    match = _RENDERER.match(normalized)
+    if match:
+        return Intent(type="set_renderer", text=raw, channel=channel, value=_RENDERERS[match.group("r")])
+    match = _FORGET.match(normalized)
+    if match:
+        return Intent(type="forget_constraint", text=raw, channel=channel, value=(match.group("n") or "").strip() or None)
+    match = _LIMIT.match(normalized)
+    if match:
+        count = "3" if match.group("n") in {"3", "three"} else "5"
+        return Intent(type="set_preference", text=raw, channel=channel, field="branch_limit", value=count)
+    if normalized in _FEWER:
+        return Intent(type="set_preference", text=raw, channel=channel, field="branch_limit", value="3")
+    if normalized in _MOREOPT:
+        return Intent(type="set_preference", text=raw, channel=channel, field="branch_limit", value="5")
+    match = _PREFER.match(normalized)
+    if match:
+        word = match.group("c")
+        channel_id = {"speech": "audio", "screen": "visual"}.get(word, word)
+        return Intent(type="set_preference", text=raw, channel=channel, field="preferred_channels", value=channel_id)
+    match = _GOAL_PREFIX.match(normalized) or _INTERRUPT_ONLY.match(normalized)
+    if match:
+        # The interruption word is kept in the text so the orchestrator can say the priority changed.
+        return Intent(type="set_goal", text=raw, channel=channel, field="interrupt" if match.group("interrupt") else None)
+    for pattern in _SAVE_PROJECT:
+        match = pattern.match(normalized)
+        if match:
+            return Intent(type="save_project", text=raw, channel=channel, value=match.group("n").strip())
+    match = _CONTINUE_PROJECT.match(normalized)
+    if match and match.group("n").strip() not in {"please", "now", "reading", "goal", "plan", "the goal", "my goal", "with it"}:
+        return Intent(type="continue_project", text=raw, channel=channel, value=match.group("n").strip())
+    return None
+
+
+_BUDGET = re.compile(r"under \$?\d+|less than \$?\d+|below \$?\d+|cheap|budget|inexpensive|affordable")
 
 
 def constraints_in(text: str) -> list[str]:
@@ -188,4 +315,10 @@ def constraints_in(text: str) -> list[str]:
         found.append("evening")
     if any(token in normalized for token in ("alert", "notify")):
         found.append("alert")
+    if _BUDGET.search(normalized):
+        found.append("budget")
+    if "remote" in normalized:
+        found.append("remote")
+    if "large print" in normalized or "large-print" in normalized:
+        found.append("large_print")
     return found

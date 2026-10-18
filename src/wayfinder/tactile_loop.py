@@ -285,3 +285,24 @@ def apply_input(session: Session, kind: str, level: int | None = None, origin: s
         count=count,
     )
     return orch._view(session)
+
+
+def set_cursor(session_id: str, index: int, origin: str = "on_screen") -> dict:
+    """Move the shared branch highlight to a specific option. Voice and camera use this so the
+    highlight, the Braille line, and the glance all follow one cursor. It never runs an action."""
+    from wayfinder import orchestrator as orch
+
+    with runtime.lock:
+        session = orch._session(session_id)
+        count = len(session.branches)
+        if count == 0 or not 0 <= index < count:
+            raise TopologyError("invalid_payload")
+        session.tactile_input_seq += 1
+        session.tactile_input = {
+            "seq": session.tactile_input_seq, "input": "next", "level": None, "origin": origin,
+            "from_board": False, "label": f"Highlight moved by {origin}", "at_ms": runtime.plane.now_ms(),
+        }
+        session.branch_cursor = {"turn_id": session.last_turn_id, "index": index}
+        branch = session.branches[index]
+        session.last_speech = f"Option {index + 1} of {count}: {branch.label}. Confirm to choose it."
+        return orch._view(session)

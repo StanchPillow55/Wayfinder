@@ -2,6 +2,11 @@
 // The grammar below mirrors src/wayfinder/access_input.py, which is what pytest checks.
 // Spoken commands go through the same turn and open-page calls as the buttons, so the
 // session still gates anything consequential. Voice cannot skip confirmation.
+//
+// Ambient-ready, not surveillance: browsers block the mic until a gesture. The first press
+// (the button, or the V key) arms it, and then the channel stays open with a visible MIC
+// indicator and a mute. Raw audio is never stored or uploaded by this app. The browser's
+// own recognizer may send audio to its vendor (Chrome does); the page says so.
 
 const WayfinderVoiceGrammar = (() => {
   const TARGET_WORDS = {
@@ -16,6 +21,16 @@ const WayfinderVoiceGrammar = (() => {
     form: "form",
     "room form": "form",
     "room request": "form",
+    shop: "shop",
+    store: "shop",
+    shopping: "shop",
+    commerce: "shop",
+    jobs: "jobs",
+    careers: "jobs",
+    "job board": "jobs",
+    unlabeled: "unlabeled",
+    "help desk": "unlabeled",
+    repair: "unlabeled",
   };
   const NUMBERS = { one: 1, two: 2, three: 3, four: 4, five: 5, 1: 1, 2: 2, 3: 3, 4: 4, 5: 5 };
   const INJECTION = [
@@ -39,7 +54,29 @@ const WayfinderVoiceGrammar = (() => {
   const YES = set("yes", "do it", "go ahead", "confirmed");
   const NO = set("no", "nope", "deny", "dont", "do not");
   const READ = set("read", "read it", "read this", "read page", "read aloud", "read again", "repeat");
-  const PASS = set("less detail", "more detail", "explain", "compare", "continue");
+  const PASS = set(
+    "less detail", "more detail", "explain", "compare", "continue",
+    "wait", "hold on", "pause", "what did you just say", "say that again", "explain that",
+    "read everything", "forget that constraint", "just do it for me", "just do it",
+    "where was i", "who is acting", "mute", "unmute", "mute audio", "unmute audio",
+    "reset my preferences", "fewer options", "more options",
+    "switch to visual", "switch to audio", "switch to braille", "switch to tactile", "switch to hands free",
+  );
+  const GOAL = [
+    /^(?:actually|instead|new priority)\b.+$/,
+    /^(?:my goal is|goal|i want to|i need to|i want|i need|i would like to|id like to|help me)\b.+$/,
+    /^(?:request|reserve|book|apply for|buy|order|purchase|add|take me|review)\b.+$/,
+  ];
+  const PROJECT = [
+    /^(?:save|name)(?: this| my| the)?(?: project| workspace| search| task)? (?:as|called|named) [a-z0-9 ]{2,60}$/,
+    /^(?:continue|resume|reopen|pick up)(?: with)?(?: my| the)?(?: project| workspace)? [a-z0-9 ]{2,60}$/,
+  ];
+  const FORGET = /^forget (?:the |my )?[a-z$0-9 -]{2,40} constraint$/;
+  const OPEN_ADDRESS = set(
+    "open address", "open the address", "open the typed address", "open the address i typed", "go to the address", "go to the typed address",
+  );
+  const URL_OPEN = /^(?:open|go to|visit|load)(?: the)?(?: website| site| address| url| page)? ([a-z0-9][a-z0-9 .\-/]*)$/;
+  const URL_SHAPE = /^[a-z0-9-]+(?:\.[a-z0-9-]+)+(?:\/[a-z0-9._~%/-]*)?$/;
   const ENTER = [
     /^(?:search|find|look up)(?: for)? .+$/,
     /^(?:set|fill in|fill|enter|type|put) .+ (?:to|with|as) .+$/,
@@ -56,6 +93,17 @@ const WayfinderVoiceGrammar = (() => {
       .replace(/[?!.,;:]+/g, "")
       .replace(/\s+/g, " ")
       .trim();
+  }
+
+  // "open example dot org slash docs" or "open example.org" -> https://example.org/docs.
+  // Only a host-shaped word list with a dot becomes an address.
+  function spokenUrl(raw) {
+    const match = URL_OPEN.exec(String(raw).trim().toLowerCase());
+    if (!match) return null;
+    let text = match[1].trim();
+    text = text.replace(/\s+dot\s+/g, ".").replace(/\s+slash\s+/g, "/");
+    text = text.replace(/\s*\.\s*/g, ".").replace(/ /g, "");
+    return URL_SHAPE.test(text) ? `https://${text}` : null;
   }
 
   function interpret(raw) {
@@ -78,6 +126,11 @@ const WayfinderVoiceGrammar = (() => {
       const target = TARGET_WORDS[opened[1].trim()];
       if (target) return { kind: "open", target };
     }
+    if (OPEN_ADDRESS.has(n)) return { kind: "open_address" };
+    const address = spokenUrl(raw);
+    if (address) return { kind: "open_url", url: address };
+    if (PROJECT.some((pattern) => pattern.test(n)) || FORGET.test(n)) return { kind: "command", text: n.slice(0, 120) };
+    if (GOAL.some((pattern) => pattern.test(n))) return { kind: "goal", text: n.slice(0, 200) };
     if (ENTER.some((pattern) => pattern.test(n))) return { kind: "enter", text: n.slice(0, 200) };
     const number = NUMBER.exec(n);
     if (number) return { kind: "number", number: NUMBERS[number[1]] };
@@ -118,7 +171,7 @@ const WayfinderVoiceGrammar = (() => {
     return { kind: "none" };
   }
 
-  return { interpret, plan, normalize };
+  return { interpret, plan, normalize, spokenUrl };
 })();
 
 if (typeof module !== "undefined" && module.exports) {
@@ -134,41 +187,93 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     const toggle = document.querySelector("#voice-toggle");
     const talk = document.querySelector("#voice-talk");
     const heard = document.querySelector("#voice-heard");
+    const speechToggle = document.querySelector("#speech-toggle");
+    const textForm = document.querySelector("#voice-text-form");
+    const textInput = document.querySelector("#voice-text");
 
-    let voiceOn = false;
-    let listening = false;
+    // micIntent: the person armed the mic. micMuted: they muted it. Recognition runs only
+    // while armed and not muted, and restarts itself because browsers end it after silence.
+    let micIntent = false;
+    let micMuted = false;
+    let micBlocked = false;
     let recognizer = null;
+    let restartTimer = null;
+    let failures = 0;
+    let speaking = false;
+    let speakingUntil = 0;
     let lastSpokenTurn = null;
     let lastSession = null;
     let orientationBlocked = false;
-    let orientationText = "";
     let first = true;
 
     const HELP_TEXT =
-      "You can say: what is here. Next. Previous. Confirm. Back. Stop. Read. " +
-      "Search for something. Set room to something. Open harbor, faq, search, or form. " +
-      "Or a number from one to five.";
+      "You can say: what is here. Next. Previous. Confirm. Back. Stop. Wait. What did you just say. Explain that. " +
+      "Less detail. Read everything. Where was I. Forget that constraint. Just do it for me. " +
+      "Find the hours. Request the north room. Open shop, jobs, faq, search, or form. " +
+      "Open example dot org. Switch to braille. Mute. Or a number from one to five.";
+    const HARD_STOP = new Set(["stop", "quiet", "be quiet", "silence", "hush", "mute", "mute audio", "wait"]);
 
     function say(message) {
       heard.textContent = message;
     }
 
-    function speak(message) {
-      if (!synth || !message) return;
-      synth.cancel();
-      const utterance = new SpeechSynthesisUtterance(message);
-      utterance.rate = 1;
-      utterance.onerror = (event) => {
-        if (event.error === "not-allowed") {
-          orientationBlocked = true;
-          say("The browser blocked spoken output until you press Talk, press V, or press Use by voice. The text is on this page.");
-        }
-      };
-      synth.speak(utterance);
+    function muted() {
+      const state = app.state();
+      return Boolean(state && state.speech_muted);
+    }
+
+    function micStatus() {
+      if (!Recognition) return "unsupported";
+      if (micBlocked) return "blocked";
+      if (!micIntent) return "available";
+      return micMuted ? "muted" : "armed";
+    }
+
+    function reportMic() {
+      const status = micStatus();
+      const chip = document.querySelector("#chip-mic");
+      if (chip) {
+        const words = {
+          available: "MIC: off. Press V to arm",
+          armed: "MIC: live, listening",
+          muted: "MIC: muted",
+          blocked: "MIC: blocked by the browser",
+          unsupported: "MIC: not supported here",
+        };
+        chip.textContent = words[status];
+        chip.dataset.status = status;
+      }
+      toggle.setAttribute("aria-pressed", String(status === "armed"));
+      toggle.textContent = status === "armed" ? "Mute microphone" : status === "muted" ? "Unmute microphone" : "Arm microphone";
+      talk.setAttribute("aria-pressed", String(status === "armed"));
+      app.reportChannel({ mic: status });
     }
 
     function shutUp() {
+      speaking = false;
       if (synth) synth.cancel();
+    }
+
+    function speak(message) {
+      if (!synth || !message || muted()) return;
+      synth.cancel();
+      const utterance = new SpeechSynthesisUtterance(message);
+      utterance.rate = 1;
+      utterance.onstart = () => {
+        speaking = true;
+      };
+      utterance.onend = () => {
+        speaking = false;
+        speakingUntil = performance.now() + 500;
+      };
+      utterance.onerror = (event) => {
+        speaking = false;
+        if (event.error === "not-allowed") {
+          orientationBlocked = true;
+          say("The browser blocked spoken output until you press a key or a button. The text is on this page.");
+        }
+      };
+      synth.speak(utterance);
     }
 
     function branchLabelList(state) {
@@ -180,17 +285,14 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     }
 
     function orientation(state) {
-      return (
-        `Wayfinder is ready. ${state.page.purpose} ${branchLabelList(state)} ` +
-        "Press the Talk button or the V key, then say a command. Say help for the list."
-      );
+      return `Wayfinder is ready. ${state.page.purpose} ${branchLabelList(state)} Say help for the list.`;
     }
 
     function readout(state) {
       return `${state.page.purpose} ${state.page.summary} ${branchLabelList(state)}`;
     }
 
-    // The highlighted option is kept in the DOM so voice and vision share it.
+    // The highlighted option is kept in the DOM so voice, camera, and switches share it.
     function branchButtons() {
       return Array.from(document.querySelectorAll("#branches .branch"));
     }
@@ -215,87 +317,56 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       return `Option ${index + 1} of ${state.branches.length}: ${branch.label}. ${branch.risk_label}.`;
     }
 
-    function setVoice(on) {
-      voiceOn = on;
-      toggle.setAttribute("aria-pressed", String(on));
-      talk.setAttribute("aria-pressed", String(listening));
-      if (!on) {
-        shutUp();
-        stopListening();
-        say("Voice is off. The command box and buttons still work.");
-      }
-    }
+    // ---- microphone: armed once, then kept open --------------------------------------
 
-    function beep() {
-      try {
-        const Context = window.AudioContext || window.webkitAudioContext;
-        if (!Context) return;
-        const context = new Context();
-        const tone = context.createOscillator();
-        tone.frequency.value = 880;
-        tone.connect(context.destination);
-        tone.start();
-        tone.stop(context.currentTime + 0.12);
-        tone.onended = () => context.close();
-      } catch (_error) {
-        // A missing tone is not an error. The live region still says Listening.
-      }
-    }
-
-    function stopListening() {
+    function stopRecognizer() {
+      clearTimeout(restartTimer);
       if (recognizer) {
+        recognizer.onend = null;
         try {
           recognizer.abort();
         } catch (_error) {
           // Already stopped.
         }
       }
-      listening = false;
-      talk.setAttribute("aria-pressed", "false");
+      recognizer = null;
     }
 
-    function startListening() {
-      if (!Recognition) {
-        say(
-          "Speech recognition is not available in this browser. Try Chrome, Edge, or Safari, " +
-            "or use the command box below. The typed command form still works.",
-        );
-        return;
-      }
-      if (listening) {
-        stopListening();
-        say("Stopped listening.");
-        return;
-      }
-      if (!voiceOn) {
-        voiceOn = true;
-        toggle.setAttribute("aria-pressed", "true");
-      }
-      shutUp();
+    function startRecognizer() {
+      if (!Recognition || !micIntent || micMuted || micBlocked) return;
+      stopRecognizer();
       recognizer = new Recognition();
       recognizer.lang = document.documentElement.lang || "en-US";
-      recognizer.continuous = false;
+      recognizer.continuous = true;
       recognizer.interimResults = false;
       recognizer.maxAlternatives = 1;
       recognizer.onstart = () => {
-        listening = true;
-        talk.setAttribute("aria-pressed", "true");
-        say("Listening. Speak one command.");
-        beep();
+        failures = 0;
+        say("Microphone is live. Say a command. Press V or the Mute button to close it.");
       };
       recognizer.onresult = (event) => {
-        const transcript = event.results[0][0].transcript;
-        handle(transcript);
+        for (let i = event.resultIndex; i < event.results.length; i += 1) {
+          if (!event.results[i].isFinal) continue;
+          const transcript = event.results[i][0].transcript;
+          // Our own voice comes back through the mic. While speaking, only a hard stop counts.
+          const talking = speaking || performance.now() < speakingUntil;
+          if (talking && !HARD_STOP.has(WayfinderVoiceGrammar.normalize(transcript))) continue;
+          handle(transcript);
+        }
       };
       recognizer.onerror = (event) => {
         const reasons = {
           "not-allowed": "Microphone permission was denied. Allow the microphone for this page, or use the command box.",
           "service-not-allowed": "This browser will not run speech recognition here. Use the command box.",
-          "no-speech": "I heard nothing. Press Talk and try again.",
           "audio-capture": "No microphone was found. Use the command box.",
           network: "Speech recognition needs the browser's online service and could not reach it. Use the command box.",
+          "no-speech": "",
           aborted: "",
         };
+        if (event.error === "not-allowed" || event.error === "service-not-allowed" || event.error === "audio-capture") {
+          micBlocked = true;
+          reportMic();
+        }
         const message = event.error in reasons ? reasons[event.error] : `Speech recognition stopped: ${event.error}.`;
         if (message) {
           say(message);
@@ -303,8 +374,11 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
         }
       };
       recognizer.onend = () => {
-        listening = false;
-        talk.setAttribute("aria-pressed", "false");
+        recognizer = null;
+        if (micIntent && !micMuted && !micBlocked) {
+          failures += 1;
+          restartTimer = setTimeout(startRecognizer, Math.min(5000, 250 * failures));
+        }
       };
       try {
         recognizer.start();
@@ -312,6 +386,41 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
         say("Could not start the microphone. Try again, or use the command box.");
       }
     }
+
+    // One control: arm on first use, then mute or unmute. Never needs a settings step.
+    function toggleMic() {
+      if (!Recognition) {
+        say("Speech recognition is not available in this browser. The typed command box and the voice text box below still work.");
+        reportMic();
+        return;
+      }
+      if (!micIntent) {
+        micIntent = true;
+        micMuted = false;
+        micBlocked = false;
+        shutUp();
+        startRecognizer();
+      } else if (micMuted) {
+        micMuted = false;
+        micBlocked = false;
+        startRecognizer();
+        say("Microphone unmuted.");
+      } else {
+        micMuted = true;
+        stopRecognizer();
+        say("Microphone muted. Nothing is being listened to. Press V to unmute.");
+      }
+      reportMic();
+    }
+
+    async function setSpeechMuted(next) {
+      if (next) shutUp();
+      await app.setPreferences({ speech_muted: next });
+      speechToggle.setAttribute("aria-pressed", String(next));
+      speechToggle.textContent = next ? "Unmute spoken audio" : "Mute spoken audio";
+    }
+
+    // ---- commands ---------------------------------------------------------------------
 
     async function send(body) {
       try {
@@ -324,7 +433,8 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     }
 
     async function handle(raw) {
-      // Echo first, in the live region, then act.
+      // A new utterance cancels speech in progress right away. Steps already taken stay.
+      shutUp();
       say(`Heard: “${raw}”.`);
       const state = app.state();
       if (!state) return;
@@ -335,9 +445,6 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
 
       switch (command.kind) {
         case "stop": {
-          shutUp();
-          // Silent unless a confirmation was waiting. Then say plainly that nothing was submitted.
-          if (!pending) lastSpokenTurn = "silent-next";
           await send({ text: "stop" });
           return;
         }
@@ -349,13 +456,25 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
         case "back":
         case "no":
         case "enter":
+        case "goal":
         case "command":
           await send({ text: command.text });
           return;
         case "open":
-          shutUp();
           await app.openTarget(command.target);
           return;
+        case "open_url":
+          await app.openTarget("url", command.url);
+          return;
+        case "open_address": {
+          const address = document.querySelector("#url-input").value.trim();
+          if (/^https?:\/\/\S+$/i.test(address)) await app.openTarget("url", address);
+          else {
+            say("There is no web address in the address box yet. Type one, or say: open example dot org.");
+            speak("There is no web address in the address box yet.");
+          }
+          return;
+        }
         case "read":
           speak(readout(state));
           return;
@@ -366,9 +485,9 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
         case "number": {
           const step = WayfinderVoiceGrammar.plan(command, { cursor, branchIds, pending });
           if (step.kind === "move") {
-            setCursor(step.cursor);
             const description = describeCursor(state, step.cursor);
             say(`Heard: “${raw}”. ${description}`);
+            await app.moveCursor(step.cursor, "voice");
             speak(description);
           } else if (step.kind === "select") {
             setCursor(step.cursor);
@@ -397,51 +516,42 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
 
     document.addEventListener("wayfinder:render", (event) => {
       const state = event.detail;
-      setCursor(0);
+      const cursor = state.branch_cursor ? state.branch_cursor.index : 0;
+      setCursor(cursor);
+      speechToggle.setAttribute("aria-pressed", String(Boolean(state.speech_muted)));
+      speechToggle.textContent = state.speech_muted ? "Unmute spoken audio" : "Mute spoken audio";
+      if (state.speech_muted) shutUp();
       const newSession = state.session_id !== lastSession;
       lastSession = state.session_id;
-      const silent = lastSpokenTurn === "silent-next";
       if (first) {
         first = false;
         lastSpokenTurn = state.turn_id;
-        orientationText = orientation(state);
-        speak(orientationText);
-        return;
-      }
-      if (!voiceOn) {
-        lastSpokenTurn = state.turn_id;
+        speak(orientation(state));
+        reportMic();
         return;
       }
       if (state.turn_id === lastSpokenTurn && !newSession) return;
       lastSpokenTurn = state.turn_id;
-      if (silent) return;
-      if (newSession) {
-        orientationText = orientation(state);
-        speak(orientationText);
-      } else {
-        speak(state.speech);
-      }
+      // Say the new line. Whatever was still being said was already cut off by the new turn.
+      if (newSession) speak(orientation(state));
+      else speak(state.speech);
     });
 
-    toggle.addEventListener("click", () => {
-      if (voiceOn) {
-        setVoice(false);
-        return;
-      }
-      setVoice(true);
-      const state = app.state();
-      if (state) {
-        lastSpokenTurn = state.turn_id;
-        say("Voice is on. Press Talk, or press V, then speak.");
-        speak(orientationBlocked || !synth ? orientation(state) : "Voice is on. Press Talk, or press V, then speak.");
-        orientationBlocked = false;
-      }
-    });
-
+    toggle.addEventListener("click", toggleMic);
     talk.addEventListener("click", () => {
       if (orientationBlocked && app.state()) speak(orientation(app.state()));
       orientationBlocked = false;
-      startListening();
+      if (!micIntent || micMuted) toggleMic();
+      else say("The microphone is already live. Just speak.");
+    });
+    speechToggle.addEventListener("click", () => setSpeechMuted(!muted()));
+
+    textForm.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const value = textInput.value.trim();
+      if (!value) return;
+      textInput.value = "";
+      handle(value);
     });
 
     window.addEventListener("keydown", (event) => {
@@ -451,15 +561,23 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       const key = event.key.toLowerCase();
       if (key === "v" || (event.key === " " && (tag === "BODY" || tag === "HTML"))) {
         event.preventDefault();
-        startListening();
+        toggleMic();
+      } else if (key === "m") {
+        event.preventDefault();
+        setSpeechMuted(!muted());
       }
     });
 
+    window.addEventListener("pagehide", stopRecognizer);
+
+    window.WayfinderVoice = { handle, grammar: WayfinderVoiceGrammar, micStatus };
+
     if (!Recognition) {
-      say("Speech recognition is not available in this browser, so Talk cannot listen. The typed command form still works.");
+      say("Speech recognition is not available in this browser, so the mic cannot listen. The typed command form and the voice text box still work.");
     }
     if (!synth) {
       say("Spoken output is not available in this browser. Replies appear on the page.");
     }
+    reportMic();
   })();
 }
