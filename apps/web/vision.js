@@ -201,6 +201,7 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     let mapper = new core.VisionMapper();
     let lastNextAt = -Infinity;
     let lastStatusKey = "";
+    let faceMissingSince = null;
     const work = document.createElement("canvas");
     work.width = WORK_W;
     work.height = WORK_H;
@@ -387,12 +388,16 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     };
 
     function frame() {
-      if (!on || paused || video.readyState < 2) return;
+      if (!on || paused || !selector || video.readyState < 2) return;
       const now = performance.now();
       const current = grayRegion();
       const energy = previous ? core.frameEnergy(previous, current) : 0;
       previous = current;
-      const result = selector.push(now, energy, facePresent);
+      if (facePresent) faceMissingSince = null;
+      else if (faceMissingSince === null) faceMissingSince = now;
+      // A brief detector miss must not wipe a nod. A still empty chair still does nothing.
+      const faceGone = faceMissingSince !== null && now - faceMissingSince > 600;
+      const result = selector.push(now, energy, !(faceGone && energy < selector.o.motion));
       meter.textContent = `Motion ${energy.toFixed(1)} of ${selector.o.motion} needed. ${result.status}.`;
       drawOverlay(result.status, result.progress);
       if (result.event) {
@@ -469,21 +474,44 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       starting = false;
       blocked = false;
       paused = false;
+      video.muted = true;
+      video.defaultMuted = true;
+      video.playsInline = true;
+      video.autoplay = true;
       video.srcObject = stream;
-      try {
-        await video.play();
-      } catch (_error) {
-        // Autoplay of a muted camera stream is allowed. If not, frames simply will not arrive.
-      }
+      // Show the box as soon as the stream exists so it cannot flash closed again.
       on = true;
       toggle.setAttribute("aria-pressed", "true");
       stage.hidden = false;
       tuning.hidden = false;
+      stream.getVideoTracks().forEach((track) => {
+        track.onended = () => {
+          // Do not hide the box and do not request the camera again. That loop was the flap.
+          if (!on || paused) return;
+          setState("The camera stream ended. The preview stays up. Turn camera off is the only stop.");
+        };
+      });
+      try {
+        if (video.readyState < 1) {
+          await new Promise((resolve) => {
+            const done = () => resolve();
+            video.addEventListener("loadedmetadata", done, { once: true });
+            window.setTimeout(done, 1200);
+          });
+        }
+        await video.play();
+      } catch (error) {
+        setState(
+          `The camera opened but the preview did not play (${error && error.name ? error.name : "unknown error"}). The stream stays on. This is not gaze tracking.`,
+        );
+      }
+      if (mine !== cameraToken || !on) return;
       previous = null;
       selector = new core.Selector({ motion: Number(threshold.value) });
       mapper = new core.VisionMapper();
       lastStatusKey = "";
       facePresent = true;
+      faceMissingSince = null;
       detector = null;
       if ("FaceDetector" in window) {
         try {
@@ -497,6 +525,7 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
           ? "CAMERA on. A clear nod or wave moves to the next choice. Holding still does nothing. A face check is running. This is not gaze tracking."
           : "CAMERA on. A clear nod or wave moves to the next choice. Holding still does nothing. This browser has no Face Detector, so a fixed box is used. This is not gaze tracking.",
       );
+      if (timer) window.clearInterval(timer);
       timer = window.setInterval(frame, 90);
       if (detector) detectTimer = window.setInterval(detectLoop, 300);
       showCursor();
@@ -554,7 +583,12 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
 
     document.addEventListener("wayfinder:render", (event) => {
       setCursor(event.detail.branch_cursor ? event.detail.branch_cursor.index : 0);
-      if (on) showCursor();
+      // A re-render must not hide a live preview or turn the camera into a toggle.
+      if (on && stream) {
+        stage.hidden = false;
+        tuning.hidden = false;
+        showCursor();
+      }
       report();
     });
     report();

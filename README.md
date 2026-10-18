@@ -38,6 +38,16 @@ uvicorn wayfinder.api:app --host 127.0.0.1 --port 8765
 
 Open http://127.0.0.1:8765 and follow [docs/demo/script.md](docs/demo/script.md). `?target=search`, `form`, `unsupported`, `public`, or `fixture` opens another page. If Playwright or Chromium is missing, Wayfinder says so and shows the labeled Harbor Line fixture.
 
+## No-hardware demo
+
+No board, account, or API key is required. The motor, BOX-3, and P4X-EYE shown in the UI are scaffolding: the motor has not spun, and nothing here claims a board was flashed.
+
+1. Install and start the server with the commands above.
+2. Open http://127.0.0.1:8765. The page is the library help FAQ.
+3. Type `what is here` and send it. The live line answers in plain language and names the next choices. It does not say "Verification: SUCCESS".
+4. Tap an option, or speak after the first click. That first click arms the microphone, spoken audio, and the laptop camera together. They stay on. Turn camera off is the only camera stop. While a sentence is playing, a tap or the start of speech cuts it off and runs that choice.
+5. The Braille plate follows the same words. A clear nod or wave in the camera preview moves to the next choice. A still face or a small expression does not.
+
 `POST /api/sessions` with `{"target": "faq" | "search" | "form" | "unsupported" | "public" | "fixture"}` opens a session on that page. An empty body opens the Harbor Line fixture.
 
 Optional environment variables:

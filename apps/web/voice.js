@@ -207,8 +207,10 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     let announced = false;
     let speaking = false;
     let speakingUntil = 0;
+    let speakToken = 0;
     let lastUtterance = "";
     let ignoreSpeechUntil = 0;
+    let startingAt = 0;
     let lastSpokenTurn = null;
     let lastSession = null;
     let orientationBlocked = false;
@@ -229,11 +231,21 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       return n.length < 2 && !/^[1-5]$/.test(n);
     }
 
+    function branchIndex(raw) {
+      const n = WayfinderVoiceGrammar.normalize(raw);
+      const state = app.state();
+      if (!state || !n) return -1;
+      return state.branches.findIndex((branch) => WayfinderVoiceGrammar.normalize(branch.label) === n);
+    }
+
+    // The mic hearing our own sentence is not a command. A real command still is,
+    // even when the prompt just said those words.
     function echoOfUs(raw) {
       const n = WayfinderVoiceGrammar.normalize(raw);
-      if (!lastUtterance || n.length < 12) return false;
+      if (!n || !lastUtterance || n.length < 8) return false;
       const command = WayfinderVoiceGrammar.interpret(raw);
-      if (["stop", "back", "next", "previous", "number", "yes", "no", "confirm"].includes(command.kind)) return false;
+      if (command.kind !== "unknown") return false;
+      if (branchIndex(raw) >= 0) return false;
       return lastUtterance.includes(n);
     }
 
@@ -287,10 +299,13 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     }
 
     // fromTap: a button press is the command, so leftover mic echo of the old sentence is dropped.
+    // speakToken drops late onend/onerror from the utterance we just cancelled. Those events
+    // used to clear `speaking` while the new sentence was still playing, so barge-in never fired.
     function barge(fromTap) {
+      speakToken += 1;
       speaking = false;
       speakingUntil = 0;
-      if (fromTap) ignoreSpeechUntil = performance.now() + 400;
+      if (fromTap) ignoreSpeechUntil = performance.now() + 450;
       if (synth) synth.cancel();
     }
 
@@ -300,25 +315,54 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
 
     function speak(message) {
       if (!synth || !message || muted()) return;
+      const token = ++speakToken;
       lastUtterance = WayfinderVoiceGrammar.normalize(message);
-      synth.cancel();
       const utterance = new SpeechSynthesisUtterance(message);
       utterance.rate = 1;
       utterance.onstart = () => {
+        if (token !== speakToken) return;
         speaking = true;
       };
       utterance.onend = () => {
+        if (token !== speakToken) return;
         speaking = false;
-        speakingUntil = performance.now() + 500;
+        speakingUntil = performance.now() + 400;
       };
       utterance.onerror = (event) => {
+        if (token !== speakToken) return;
         speaking = false;
+        if (event.error === "interrupted" || event.error === "canceled") return;
         if (event.error === "not-allowed") {
           orientationBlocked = true;
           say("The browser blocked spoken output until you press a key or a button. The text is on this page.");
         }
       };
-      synth.speak(utterance);
+      const sayIt = () => {
+        if (token !== speakToken || muted()) return;
+        synth.speak(utterance);
+      };
+      // cancel() and speak() in the same turn makes Chrome drop the new utterance.
+      if (synth.speaking || synth.pending) {
+        synth.cancel();
+        window.setTimeout(sayIt, 50);
+      } else {
+        sayIt();
+      }
+    }
+
+    // Meaningful speech (not silence) cuts TTS immediately. Partials do not run a command.
+    function acceptRecognition(transcript, isFinal) {
+      const text = String(transcript || "");
+      if (!text.trim()) return;
+      const normalized = WayfinderVoiceGrammar.normalize(text);
+      if (isFinal && performance.now() < ignoreSpeechUntil && !HARD_STOP.has(normalized)) return;
+      if (tooThin(text)) {
+        if (isFinal) say(`Heard: “${text.trim()}”.`);
+        return;
+      }
+      if (echoOfUs(text)) return;
+      barge(false);
+      if (isFinal) handle(text);
     }
 
     function branchLabelList(state) {
@@ -368,17 +412,27 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       return Boolean(Recognition) && micIntent && !micMuted && !micBlocked;
     }
 
+    function releaseRecognizer() {
+      const old = recognizer;
+      recognizer = null;
+      if (!old) return;
+      old.onstart = null;
+      old.onresult = null;
+      old.onerror = null;
+      old.onend = null;
+      try {
+        old.abort();
+      } catch (_error) {
+        // Already stopped.
+      }
+    }
+
     function stopRecognizer() {
       clearTimeout(restartTimer);
       restartTimer = null;
       phase = "idle";
       alive = false;
-      if (!recognizer) return;
-      try {
-        recognizer.abort();
-      } catch (_error) {
-        // Already stopped.
-      }
+      releaseRecognizer();
     }
 
     function scheduleRestart(delay) {
@@ -405,25 +459,12 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
         reportMic();
       };
       rec.onresult = (event) => {
-        let interim = "";
         for (let i = event.resultIndex; i < event.results.length; i += 1) {
           const result = event.results[i];
-          const transcript = result[0].transcript || "";
-          if (!result.isFinal) {
-            interim += transcript;
-            continue;
-          }
-          // Only a finished result can act. Partials only cut the sentence off.
-          const normalized = WayfinderVoiceGrammar.normalize(transcript);
-          if (performance.now() < ignoreSpeechUntil && !HARD_STOP.has(normalized)) continue;
-          if (tooThin(transcript)) {
-            if (transcript.trim()) say(`Heard: “${transcript.trim()}”.`);
-            continue;
-          }
-          if (echoOfUs(transcript)) continue;
-          handle(transcript);
+          const transcript = result[0] ? result[0].transcript : "";
+          // A meaningful partial cancels TTS now. Only a finished result runs the command.
+          acceptRecognition(transcript, Boolean(result.isFinal));
         }
-        if (interim && !tooThin(interim) && (speaking || performance.now() < speakingUntil)) barge(false);
       };
       rec.onerror = (event) => {
         if (event.error === "not-allowed" || event.error === "service-not-allowed" || event.error === "audio-capture") {
@@ -440,11 +481,17 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
           reportMic();
           return;
         }
-        // no-speech, aborted, and network are not fatal. onend restarts while still armed.
+        // network often ends the session without a following onend. Restart while still armed.
+        if (event.error === "network" || event.error === "aborted") {
+          alive = false;
+          phase = "idle";
+          if (shouldListen()) scheduleRestart(250);
+        }
+        // no-speech is not fatal. onend restarts while still armed.
       };
       rec.onend = () => {
         alive = false;
-        phase = "idle";
+        if (phase === "listening" || phase === "starting") phase = "idle";
         if (shouldListen()) scheduleRestart(200);
       };
       return rec;
@@ -452,10 +499,12 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
 
     function startRecognizer() {
       if (!shouldListen()) return;
-      // Already running or a start() is in flight. A second start() throws InvalidStateError and used to kill the mic.
-      if (alive || phase === "listening" || phase === "starting") return;
+      // Already hearing. A second start() throws InvalidStateError and must not kill this session.
+      if (alive && phase === "listening") return;
+      if (phase === "starting" && performance.now() - startingAt < 1200) return;
       if (!recognizer) recognizer = buildRecognizer();
       phase = "starting";
+      startingAt = performance.now();
       try {
         recognizer.start();
       } catch (error) {
@@ -464,13 +513,14 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
             phase = "listening";
             return;
           }
-          // The engine has not released the previous session. Do not abort it. Retry once it ends.
+          // This instance is stuck. Replace it and try again so the mic does not stay dead.
+          releaseRecognizer();
           phase = "idle";
-          scheduleRestart(400);
+          scheduleRestart(200);
           return;
         }
         phase = "idle";
-        scheduleRestart(300);
+        scheduleRestart(400);
       }
     }
 
@@ -621,6 +671,12 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
           return;
         }
         default: {
+          const named = branchIndex(raw);
+          if (named >= 0) {
+            setCursor(named);
+            await send({ action_id: state.branches[named].id });
+            return;
+          }
           const message = "I did not catch a command. Say help for the list.";
           say(`Heard: “${raw}”. ${message}`);
           speak(message);
@@ -694,7 +750,31 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       stopRecognizer();
     });
 
-    window.WayfinderVoice = { handle, grammar: WayfinderVoiceGrammar, micStatus, arm, barge, shutUp };
+    // If start() never reaches onstart, or onend/network leaves the engine idle, bring it back.
+    window.setInterval(() => {
+      if (!shouldListen()) return;
+      if (phase === "starting" && performance.now() - startingAt > 8000) {
+        alive = false;
+        phase = "idle";
+        releaseRecognizer();
+        scheduleRestart(200);
+        return;
+      }
+      if (!alive && phase === "idle" && !restartTimer) startRecognizer();
+    }, 1500);
+
+    window.WayfinderVoice = {
+      handle,
+      grammar: WayfinderVoiceGrammar,
+      micStatus,
+      arm,
+      barge,
+      shutUp,
+      // Same path as the recognizer. Finals run the command. Partials only cut TTS.
+      simulateResult(transcript, isFinal = true) {
+        acceptRecognition(transcript, isFinal);
+      },
+    };
 
     if (!Recognition) {
       say("Speech recognition is not available in this browser, so the mic cannot listen. The typed command form and the voice text box still work.");

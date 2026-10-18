@@ -142,12 +142,12 @@
       <p id="vision-state" class="status-line" aria-live="polite" aria-atomic="true">Camera is off.</p>
       <p id="vision-cursor" class="status-line">No option is highlighted by the camera selector.</p>
       <div class="vision-stage" id="vision-stage" hidden>
-        <video id="vision-video" playsinline muted aria-label="Your laptop camera preview, shown only on this screen"></video>
+        <video id="vision-video" width="320" height="240" autoplay muted playsinline aria-label="Your laptop camera preview, shown only on this screen"></video>
         <canvas id="vision-overlay" width="320" height="240" aria-hidden="true"></canvas>
       </div>
       <div class="row" id="vision-tuning" hidden>
         <label for="vision-threshold">Motion needed to count as a move</label>
-        <input id="vision-threshold" type="range" min="18" max="50" value="28">
+        <input id="vision-threshold" type="range" min="16" max="50" value="20">
         <span id="vision-meter">Motion 0.0. Waiting.</span>
       </div>
       <p class="hint"><strong>Laptop-camera demo. This is not gaze tracking, it is not a blink detector, and it is not the P4X-EYE.</strong> Put your face in the box. A clearly large nod, lean, or wave moves to the next option. A longer large move chooses the highlighted option. Small expression changes, blinks, and brief motion do nothing. Becoming still after an expression does not choose anything, so an empty chair or a blank stare cannot choose either. An option that needs confirmation needs that longer move a second time. Two quick moves decline. It can fail in dim or changing light, with a moving background, or with a camera that shifts. The video stays in this tab. No image is stored or sent, and none goes into the page model. If the browser's Face Detector is missing, a fixed box is used and nobody checks that a face is in it. A second press does not turn the camera off. Turn camera off is the only stop.</p>

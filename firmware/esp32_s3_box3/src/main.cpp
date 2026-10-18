@@ -99,44 +99,57 @@ static void sendError(const char* traceId, uint32_t sequence, const char* ackId,
 }
 
 // ---- physical buttons -> touch.event control ------------------------------
-// Three momentary buttons (active low, INPUT_PULLUP) call the existing
-// emitTouchControl. Input only; this never drives a pin. GPIO0 (confirm) is the
-// confident BOOT button; the other two are UNVERIFIED (box3_pins.h).
+// Input only (INPUT_PULLUP, active low). This never drives a pin, and never
+// touches the LCD control pins (GPIO47/48). GPIO0 (BOOT) is read-only.
 static constexpr uint32_t kBtnDebounceMs = 30;
+static constexpr int kNumProbePins = sizeof(kBox3ProbePins) / sizeof(kBox3ProbePins[0]);
 
-struct Box3Button {
+struct PinWatch {
   int pin;
-  const char* control;  // "confirm" | "deny" | "stop"
-  bool stable;          // debounced state, true = pressed
+  bool stable;      // debounced level, true = LOW (pressed, active-low)
   bool raw;
   uint32_t changedMs;
 };
 
-static Box3Button gBox3Buttons[3] = {
-    {kBox3ButtonConfirmGpio, "confirm", false, false, 0},
-    {kBox3ButtonDenyGpioUnverified, "deny", false, false, 0},
-    {kBox3ButtonStopGpioUnverified, "stop", false, false, 0},
-};
+static PinWatch gWatch[kNumProbePins];
+
+// Diagnostic event: which safe candidate pin changed, and its level. Lets a
+// human discover the real button pin by pressing and reading the stream.
+static void emitDebugPin(int pin, int level) {
+  JsonDocument payload;
+  payload["debug_pin"] = pin;
+  payload["level"] = level;  // 0 = pressed (LOW), 1 = released (HIGH)
+  sendMessage("touch.event", "pin-probe", 0, payload.as<JsonObject>());
+}
 
 static void setupButtons() {
-  for (auto& b : gBox3Buttons) {
-    pinMode(b.pin, INPUT_PULLUP);
-    b.raw = b.stable = (digitalRead(b.pin) == LOW);
-    b.changedMs = millis();
+  for (int i = 0; i < kNumProbePins; i++) {
+    gWatch[i].pin = kBox3ProbePins[i];
+    pinMode(gWatch[i].pin, INPUT_PULLUP);
+    gWatch[i].raw = gWatch[i].stable = (digitalRead(gWatch[i].pin) == LOW);
+    gWatch[i].changedMs = millis();
   }
 }
 
 static void pollButtons() {
   const uint32_t now = millis();
-  for (auto& b : gBox3Buttons) {
-    const bool sample = (digitalRead(b.pin) == LOW);
-    if (sample != b.raw) {
-      b.raw = sample;
-      b.changedMs = now;
+  for (int i = 0; i < kNumProbePins; i++) {
+    PinWatch& w = gWatch[i];
+    const bool sample = (digitalRead(w.pin) == LOW);
+    if (sample != w.raw) {
+      w.raw = sample;
+      w.changedMs = now;
     }
-    if (b.raw != b.stable && now - b.changedMs >= kBtnDebounceMs) {
-      b.stable = b.raw;
-      if (b.stable) emitTouchControl(b.control);  // fire on press only
+    if (w.raw != w.stable && now - w.changedMs >= kBtnDebounceMs) {
+      w.stable = w.raw;
+#if WAYFINDER_BOX3_PIN_PROBE
+      // Discovery: report every edge on a safe candidate pin.
+      emitDebugPin(w.pin, w.stable ? 0 : 1);
+#endif
+      // Confirmed mapping: GPIO0 press (LOW) -> confirm.
+      if (w.pin == kBox3ButtonConfirmGpio && w.stable) {
+        emitTouchControl("confirm");
+      }
     }
   }
 }
@@ -235,10 +248,7 @@ static void pumpSerial() {
   }
 }
 
-void setup() {
-  Serial.begin(115200);
-  setupButtons();
-  delay(200);
+static void sendBootHealth() {
   JsonDocument payload;
   payload["board"] = "ESP32-S3-BOX-3";
   payload["firmware"] = kFirmwareName;
@@ -254,7 +264,37 @@ void setup() {
   sendMessage("health", "boot", 0, payload.as<JsonObject>());
 }
 
+static bool gWasConnected = false;
+static bool gAnnounced = false;
+
+void setup() {
+  Serial.begin(115200);
+  // Native USB-Serial/JTAG (ARDUINO_USB_CDC_ON_BOOT=1): writes must not block
+  // when no host has the port open, or the boot line is lost and the Mac probe
+  // times out. A short TX timeout makes write() drop instead of stall.
+  Serial.setTxTimeoutMs(10);
+  setupButtons();
+  delay(200);
+  gWasConnected = (bool)Serial;
+  // The boot line emitted here races USB enumeration; loop() re-sends it ONCE
+  // on the first host-connect edge so a probe that opens the port late still
+  // gets a health line. The probe can also ask for health at any time, which
+  // handleLine answers; so we announce at most once to avoid spamming the link.
+  sendBootHealth();
+}
+
 void loop() {
+  // Announce health once when a host first connects after boot. The Mac probe
+  // opens the port after reset, so without this the boot line is already gone.
+  // CDC "connected" can flicker; the gAnnounced latch keeps this to one re-send.
+  const bool connected = (bool)Serial;
+  if (connected && !gWasConnected && !gAnnounced) {
+    delay(50);  // let the host finish opening the CDC endpoint
+    sendBootHealth();
+    gAnnounced = true;
+  }
+  gWasConnected = connected;
+
   pumpSerial();
   pollButtons();
 }

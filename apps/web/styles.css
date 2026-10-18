@@ -279,11 +279,14 @@ li { margin: 0.35rem 0; }
   background: #000;
 }
 
+.vision-stage:not([hidden]) { display: block; }
 .vision-stage video,
 .vision-stage canvas {
   display: block;
   width: 100%;
-  height: auto;
+  height: 240px;
+  object-fit: cover;
+  background: #111;
   transform: scaleX(-1);
 }
 
