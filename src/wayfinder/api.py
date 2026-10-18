@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -11,6 +12,22 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from wayfinder.contracts import ACTUATOR, ADR_ID, PROPOSAL_VERSION, RETIRED_ENDPOINT_IDS
+from wayfinder.observability import mark_sentry_active
+
+_sentry_dsn = os.environ.get("WAYFINDER_SENTRY_DSN", "").strip()
+if _sentry_dsn:
+    try:
+        import sentry_sdk
+    except ImportError:
+        pass
+    else:
+        sentry_sdk.init(
+            dsn=_sentry_dsn,
+            traces_sample_rate=1.0,
+            profiles_sample_rate=1.0,
+            environment="hackathon",
+        )
+        mark_sentry_active()
 from wayfinder.demo_site import build_snapshot, to_html
 from wayfinder.models import TopologyError
 from wayfinder.orchestrator import (

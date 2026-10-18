@@ -308,3 +308,58 @@ li { margin: 0.35rem 0; }
 @media (prefers-reduced-motion: reduce) {
   .motor-bar, .pin { transition: none; }
 }
+
+/* Shell: channel chips, router line, capability registry. */
+.shell-bar, .router {
+  width: min(920px, calc(100% - 2rem));
+  margin: 0.5rem auto;
+}
+
+.shell-bar { display: flex; flex-wrap: wrap; gap: 0.5rem; align-items: center; }
+
+.chip {
+  display: inline-block;
+  border: 2px solid var(--line);
+  border-radius: 999px;
+  padding: 0.15rem 0.8rem;
+  background: var(--card);
+  font-weight: 600;
+  font-size: 0.95rem;
+}
+
+.chip[data-status="armed"] { background: var(--ok-bg); color: var(--ok-ink); }
+.chip[data-status="muted"], .chip[data-status="blocked"], .chip[data-status="unsupported"] { background: var(--warn-bg); color: var(--warn-ink); }
+
+.router-line {
+  margin: 0;
+  padding: 0.5rem 0.9rem;
+  border-left: 6px solid var(--focus);
+  background: var(--card);
+  font-weight: 700;
+}
+
+.selections { margin: 0.25rem 0 0; padding-left: 1.5rem; font-size: 0.95rem; color: var(--muted); }
+
+.capabilities { list-style: none; padding: 0; margin: 0; display: grid; gap: 0.6rem; }
+.cap { border: 2px solid var(--line); border-radius: 0.6rem; padding: 0.6rem 0.8rem; background: var(--card); }
+.cap.acting { border-color: var(--focus); box-shadow: 0 0 0 3px var(--focus); }
+
+/* The renderer switch only marks which sensation leads. Speech, Braille, and the
+   motor cue sit alongside the page. No output hides the choices or blocks a tap. */
+#branches,
+#branches .branch,
+#page-frame,
+#confirm {
+  pointer-events: auto;
+}
+body[data-renderer="audio"] #branches,
+body[data-renderer="hands_free"] #branches,
+body[data-renderer="tactile"] #branches,
+body[data-renderer="visual"] #branches {
+  display: block;
+}
+body[data-renderer="tactile"] .braille-panel,
+body[data-renderer="tactile"] #tactile-loop { outline: 4px solid var(--focus); outline-offset: 4px; }
+body[data-renderer="visual"] #branches .branch { outline: 3px solid var(--focus); }
+body[data-renderer="audio"] #live,
+body[data-renderer="hands_free"] #live { outline: 4px solid var(--focus); outline-offset: 2px; }

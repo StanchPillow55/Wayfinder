@@ -17,6 +17,20 @@
   </header>
 
   <div id="live" class="live" aria-live="polite" aria-atomic="true"></div>
+  <p id="channel-live" class="status-line" aria-live="polite" aria-atomic="true">MIC off. CAMERA off.</p>
+
+  <section class="shell-bar" aria-label="Channel status">
+    <span class="chip" id="chip-mic" data-status="available">MIC off</span>
+    <span class="chip" id="chip-camera" data-status="available">CAMERA off</span>
+    <span class="chip" id="chip-audio" data-status="armed">AUDIO: speaking</span>
+    <span class="chip" id="chip-memory" data-status="armed">MEMORY: session only</span>
+    <span class="chip" id="chip-renderer">OUTPUT: Everything on</span>
+    <p class="hint" id="memory-scope">Raw microphone and video are never stored, uploaded, or written to memory.</p>
+  </section>
+  <section class="router" aria-label="Capability selected by the router">
+    <p id="router-line" class="router-line">No capability selected yet.</p>
+    <ol id="selections" class="selections" aria-label="Capabilities used this turn"></ol>
+  </section>
 
   <section class="panel braille-panel" aria-labelledby="braille-heading">
     <h2 id="braille-heading">Braille</h2>
@@ -49,24 +63,81 @@
         <button type="button" data-command="less detail">Less detail</button>
         <button type="button" data-command="more detail">More detail</button>
       </div>
+      <div class="row" role="group" aria-label="Interrupt or steer">
+        <button type="button" data-command="wait">Wait</button>
+        <button type="button" data-command="what did you just say">What did you just say</button>
+        <button type="button" data-command="explain that">Explain that</button>
+        <button type="button" data-command="read everything">Read everything</button>
+        <button type="button" data-command="forget that constraint">Forget that constraint</button>
+        <button type="button" data-command="just do it for me">Just do it for me</button>
+        <button type="button" data-command="where was i">Where was I?</button>
+      </div>
+      <p class="hint">While Wayfinder is speaking, tap an option, start talking, or press Stop, Back, or a new command. The sentence stops immediately and that choice runs. The session stays. “Just do it for me” takes the safe steps toward your goal and still waits for your own yes before anything is submitted. Try: find the hours, request the north room, add the talking kitchen scale to my cart, actually take me to the cart.</p>
       <p class="hint">Press 1 through 5 for an option when you are not typing and no confirmation is open. Escape declines a waiting confirmation.</p>
+    </section>
+
+    <section class="panel" id="output" aria-labelledby="output-heading">
+      <h2 id="output-heading">Output and channels</h2>
+      <p class="hint">Channels, not settings about a person. Speech, the page, Braille, and the motor cue can all be on together. Tactile is an extra sensation alongside the page. The choices stay on screen. There is nothing to set up.</p>
+      <div class="row" role="group" aria-label="Foreground output">
+        <button type="button" data-renderer="all" aria-pressed="true">Everything on</button>
+        <button type="button" data-renderer="visual" aria-pressed="false">Visual</button>
+        <button type="button" data-renderer="audio" aria-pressed="false">Audio</button>
+        <button type="button" data-renderer="tactile" aria-pressed="false">Tactile and Braille</button>
+        <button type="button" data-renderer="hands_free" aria-pressed="false">Hands-free</button>
+      </div>
+      <p id="renderer-status" class="status-line"></p>
+      <h3>Input channels</h3>
+      <ul id="channels-in"></ul>
+      <h3>Output channels</h3>
+      <ul id="channels-out"></ul>
+    </section>
+
+    <section class="panel" id="registry" aria-labelledby="registry-heading">
+      <h2 id="registry-heading">Capabilities</h2>
+      <p class="hint">A local registry, not a store and not a sponsor SDK. The router picks one entry for each step and the line at the top says which. Trust is separated: the reader and verifier only read, the policy gate only says allow, confirm, or deny, and only the Browser Navigator runs a grounded action. Specialists such as the commerce and jobs agents sit behind the same router and gate.</p>
+      <ul id="capabilities" class="capabilities"></ul>
+    </section>
+
+    <section class="panel" id="goal-panel" aria-labelledby="goal-heading">
+      <h2 id="goal-heading">Goal and path</h2>
+      <p id="goal-plan-text"></p>
+      <ol id="goal-steps" aria-label="Goal steps taken"></ol>
+      <h3>Where you have been</h3>
+      <ol id="journey" aria-label="Your path in this session"></ol>
+      <p id="prefs-line" class="hint"></p>
+      <p id="projects-line" class="hint"></p>
+      <form id="project-form" class="row">
+        <label for="project-name">Name this task so you can continue it later</label>
+        <input id="project-name" autocomplete="off" placeholder="room booking">
+        <button type="submit">Save project</button>
+      </form>
     </section>
 
     <section class="panel" id="access" aria-labelledby="access-heading">
       <h2 id="access-heading">Hands-free modes</h2>
-      <p class="hint">Two ways to use this page without a mouse. Turning one on leaves the command box, Braille, and your session as they are. Either mode can be turned off at any time.</p>
+      <p class="hint">The first click, tap, or key anywhere turns the microphone, spoken audio, and camera on together. They stay on. Arm is not a switch. Mute and Turn camera off are separate.</p>
 
       <h3 id="voice-heading">Use by voice</h3>
       <div class="row">
-        <button type="button" id="voice-toggle" class="big" aria-pressed="false">Use by voice</button>
-        <button type="button" id="voice-talk" class="big" aria-pressed="false" aria-keyshortcuts="V">Talk: press once, then speak</button>
+        <button type="button" id="voice-toggle" class="big" aria-pressed="false" aria-keyshortcuts="V">Arm microphone</button>
+        <button type="button" id="voice-talk" class="big" aria-pressed="false">Talk: press once, then keep speaking</button>
+        <button type="button" id="voice-mute" class="big" aria-pressed="false">Mute microphone</button>
+        <button type="button" id="speech-toggle" class="big" aria-pressed="false" aria-keyshortcuts="M">Mute spoken audio</button>
       </div>
-      <p id="voice-heard" class="status-line" aria-live="polite" aria-atomic="true">Voice is off. Press Talk, or press V, then say a command such as “what is here”.</p>
-      <p class="hint">Say: what is here, next, previous, confirm, back, stop, read, help, search for something, set room to something, open harbor, open faq, open search, open form, or a number from 1 to 5. Confirm on an option that needs confirmation takes two spoken confirms: the first chooses it, the second says yes. Press V or Space when focus is not on a button or box. This uses your browser's speech recognition. In Chrome that audio goes to the browser vendor's service, so it is not offline. If your browser has none, the typed command box still works.</p>
+      <form id="voice-text-form" class="row">
+        <label for="voice-text">Say it by typing (same path as the microphone)</label>
+        <input id="voice-text" autocomplete="off" placeholder="open shop">
+        <button type="submit">Send as speech</button>
+      </form>
+      <p id="voice-heard" class="status-line" aria-live="polite" aria-atomic="true">Voice is off until the first click, tap, or key. Then say a command such as “what is here”.</p>
+      <p class="hint">Say: what is here, next, previous, confirm, back, stop, wait, what did you just say, explain that, less detail, read everything, where was I, forget that constraint, just do it for me, find the hours, request the north room, open shop, open jobs, open faq, open example dot org, switch to braille, mute, or a number from 1 to 5. Confirm on an option that needs confirmation takes two spoken confirms: the first chooses it, the second says yes. Unknown speech is never executed. Mute microphone and Mute spoken audio are separate from arming. This uses your browser's speech recognition. In Chrome that audio goes to the browser vendor's service, so it is not offline. If your browser has none, the typed command box still works.</p>
 
       <h3 id="vision-heading">Use by looking</h3>
       <div class="row">
-        <button type="button" id="vision-toggle" class="big" aria-pressed="false">Use by looking</button>
+        <button type="button" id="vision-toggle" class="big" aria-pressed="false" aria-keyshortcuts="C">Arm camera</button>
+        <button type="button" id="vision-off" class="big">Turn camera off</button>
+        <button type="button" id="vision-mute" class="big" aria-pressed="false" hidden>Mute camera</button>
       </div>
       <p id="vision-state" class="status-line" aria-live="polite" aria-atomic="true">Camera is off.</p>
       <p id="vision-cursor" class="status-line">No option is highlighted by the camera selector.</p>
@@ -76,10 +147,10 @@
       </div>
       <div class="row" id="vision-tuning" hidden>
         <label for="vision-threshold">Motion needed to count as a move</label>
-        <input id="vision-threshold" type="range" min="4" max="30" value="10">
+        <input id="vision-threshold" type="range" min="18" max="50" value="28">
         <span id="vision-meter">Motion 0.0. Waiting.</span>
       </div>
-      <p class="hint"><strong>Laptop-camera demo. This is not gaze tracking, it is not a blink detector, and it is not the P4X-EYE.</strong> Put your face in the box. A deliberate head nod, lean, or hand wave in the box moves to the next option. Holding still for about two seconds right after that chooses the highlighted option. An option that needs confirmation needs the nod-then-hold signal a second time. Moving twice quickly declines. Holding still with no nod first does nothing, so an empty chair or a blank stare cannot choose. It can fail in dim or changing light, with a moving background, or with a camera that shifts. The video stays in this tab. No image is stored or sent, and none goes into the page model. If the browser's Face Detector is missing, a fixed box is used and nobody checks that a face is in it.</p>
+      <p class="hint"><strong>Laptop-camera demo. This is not gaze tracking, it is not a blink detector, and it is not the P4X-EYE.</strong> Put your face in the box. A clearly large nod, lean, or wave moves to the next option. A longer large move chooses the highlighted option. Small expression changes, blinks, and brief motion do nothing. Becoming still after an expression does not choose anything, so an empty chair or a blank stare cannot choose either. An option that needs confirmation needs that longer move a second time. Two quick moves decline. It can fail in dim or changing light, with a moving background, or with a camera that shifts. The video stays in this tab. No image is stored or sent, and none goes into the page model. If the browser's Face Detector is missing, a fixed box is used and nobody checks that a face is in it. A second press does not turn the camera off. Turn camera off is the only stop.</p>
     </section>
 
     <section class="panel tactile-loop" id="tactile-loop" aria-labelledby="tactile-loop-heading">
@@ -108,6 +179,9 @@
         <button type="button" data-target="search" aria-pressed="false">City services (search)</button>
         <button type="button" data-target="form" aria-pressed="false">Room request (form)</button>
         <button type="button" data-target="unsupported" aria-pressed="false">Market poster (unsupported)</button>
+        <button type="button" data-target="shop" aria-pressed="false">Access shop (commerce mirror)</button>
+        <button type="button" data-target="jobs" aria-pressed="false">Jobs board (jobs mirror)</button>
+        <button type="button" data-target="unlabeled" aria-pressed="false">Help desk (unlabeled controls)</button>
         <button type="button" data-target="public" aria-pressed="false">Public page (best effort)</button>
         <button type="button" data-target="fixture" aria-pressed="false">Harbor Line (offline fixture)</button>
       </div>
@@ -139,6 +213,31 @@
     <section class="panel" aria-labelledby="branch-heading">
       <h2 id="branch-heading">What you can do</h2>
       <ol id="branches"></ol>
+    </section>
+
+    <section class="panel" id="semantic-panel" aria-labelledby="semantic-heading">
+      <h2 id="semantic-heading">One semantic state</h2>
+      <p class="hint" id="compiled-line"></p>
+      <p><strong>Situation.</strong> <span id="sem-situation"></span></p>
+      <h3>What matters</h3>
+      <ul id="sem-matters"></ul>
+      <h3>Actions, with consequence and confidence</h3>
+      <ol id="sem-actions"></ol>
+      <h3>Warnings</h3>
+      <ul id="sem-warnings"></ul>
+      <h3>Prior path</h3>
+      <ol id="sem-path"></ol>
+      <p><strong>User goal.</strong> <span id="sem-goal"></span></p>
+    </section>
+
+    <section class="panel" id="repair-panel" aria-labelledby="repair-heading">
+      <h2 id="repair-heading">Page semantics and repair</h2>
+      <p id="semantics-text"></p>
+      <p class="hint" id="semantics-limit"></p>
+      <h3>Inferred control names</h3>
+      <p id="repairs-empty" class="hint">No control needed an inferred name on this page.</p>
+      <ul id="repairs"></ul>
+      <p class="hint">An inferred name is a read-only suggestion from nearby visible text, marked as inferred. The live site was not modified, and password or card fields are never filled.</p>
     </section>
 
     <section class="panel" aria-labelledby="check-heading">
@@ -176,6 +275,8 @@
 
     <section class="panel" aria-labelledby="topology-heading">
       <h2 id="topology-heading">Hardware topology</h2>
+      <p id="hardware-statement" class="status-line"></p>
+      <ul id="hardware-facts"></ul>
       <p>The Mac holds canonical state. Each board has its own USB link. Nothing here uses a UART cable between an ESP32-S3 and an ESP32-C3.</p>
       <ol id="devices"></ol>
       <div class="row">
@@ -201,6 +302,7 @@
   </footer>
   <script src="/static/braille.js"></script>
   <script src="/static/tactile.js"></script>
+  <script src="/static/shell.js"></script>
   <script src="/static/app.js"></script>
   <script src="/static/voice.js"></script>
   <script src="/static/vision.js"></script>

@@ -3,26 +3,26 @@
 // frame to frame, in this tab only. No frame is stored, sent, or put in the page model.
 //
 // Signal (the part that is honest about what a webcam and a few lines of JS can do):
-//   - A deliberate head nod, lean, or hand wave in the box = "next".
-//   - Holding still for ~2 s, right after a "next", = "select" the highlighted option.
-//   - Holding still with no deliberate move first does nothing. An empty chair or a
-//     blank stare therefore cannot choose anything.
-//   - Choosing something that needs confirmation takes that signal a second time.
-//     Moving twice quickly declines. The session decides what needs confirmation.
+//   - A clearly large nod, lean, or hand wave in the box = "next".
+//   - A longer large move, still clearly deliberate, = "select" the highlighted option.
+//   - Small expression changes, blinks, brief motion, and ambiguous motion do nothing.
+//   - Becoming still after an expression does not choose anything. An empty chair
+//     or a blank stare cannot choose anything either.
+//   - Choosing something that needs confirmation takes a select signal a second time.
+//     Two quick nexts decline. The session decides what needs confirmation.
 //
 // Failure modes are shown in the UI: dim or changing light, a moving background, a
-// camera that shifts, and the missing Face Detector. A single natural blink is far too
-// small for this method and is deliberately ignored.
+// camera that shifts, and the missing Face Detector. This is not gaze tracking.
 
 const WayfinderVisionCore = (() => {
   const DEFAULTS = {
-    motion: 10, // mean per-pixel change that counts as a deliberate move
+    motion: 28, // clearly larger than a blink or a small expression change
     big: 70, // so big it is a bumped camera or a lighting jump: ignored
-    minFrames: 2, // a move must last at least this many frames
+    minFrames: 4, // a blink or a brief twitch is shorter than this
+    minBurstMs: 320, // brief motion is not a nod
+    selectBurstMs: 650, // a longer large move chooses; stillness never does
     burstMaxMs: 1200, // longer than this is walking around, not a nod
-    steadyMs: 2000, // hold still this long after a move to choose
-    armWindowMs: 8000, // the choose signal must come within this long after a move
-    burstCooldownMs: 500,
+    burstCooldownMs: 400,
     selectCooldownMs: 1500,
   };
 
@@ -48,65 +48,57 @@ const WayfinderVisionCore = (() => {
       this.o = { ...DEFAULTS, ...options };
       this.reset();
       this.cooldownUntil = 0;
-      this.armedUntil = 0;
     }
 
     reset() {
       this.burstStart = null;
       this.burstFrames = 0;
       this.burstTooLong = false;
-      this.steadySince = null;
     }
 
     // One frame. t is ms, energy comes from frameEnergy, present is false when a face
     // detector is running and sees no face. Returns {event, status, progress}.
+    // Stillness never confirms. A face that settles after an expression does nothing.
     push(t, energy, present = true) {
       const o = this.o;
       if (!present) {
         this.reset();
-        this.armedUntil = 0;
         return { event: null, status: "absent", progress: 0 };
       }
       if (energy >= o.big) {
         this.reset();
         return { event: null, status: "ignored", progress: 0 };
       }
-      if (energy >= o.motion) {
-        if (this.burstStart === null) {
-          this.burstStart = t;
-          this.burstFrames = 0;
-          this.burstTooLong = false;
+      // Below the deliberate threshold: expression, blink-sized change, or quiet.
+      // Ambiguous energy does not arm a choice and does not confirm.
+      if (energy < o.motion) {
+        if (this.burstStart === null) return { event: null, status: "steady", progress: 0 };
+        const duration = t - this.burstStart;
+        const deliberate =
+          this.burstFrames >= o.minFrames &&
+          duration >= o.minBurstMs &&
+          !this.burstTooLong &&
+          t >= this.cooldownUntil;
+        const choose = deliberate && duration >= o.selectBurstMs;
+        this.reset();
+        if (choose) {
+          this.cooldownUntil = t + o.selectCooldownMs;
+          return { event: "select", status: "move", progress: 1 };
         }
-        this.burstFrames += 1;
-        if (t - this.burstStart > o.burstMaxMs) this.burstTooLong = true;
-        this.steadySince = null;
-        return { event: null, status: "moving", progress: 0 };
-      }
-      if (this.burstStart !== null) {
-        const ok = this.burstFrames >= o.minFrames && !this.burstTooLong && t >= this.cooldownUntil;
-        this.burstStart = null;
-        this.burstFrames = 0;
-        this.burstTooLong = false;
-        this.steadySince = t;
-        if (ok) {
-          this.armedUntil = t + o.armWindowMs;
+        if (deliberate) {
           this.cooldownUntil = t + o.burstCooldownMs;
           return { event: "next", status: "move", progress: 0 };
         }
         return { event: null, status: "settling", progress: 0 };
       }
-      if (this.steadySince === null) this.steadySince = t;
-      if (t < this.armedUntil) {
-        const held = t - this.steadySince;
-        if (held >= o.steadyMs && t >= this.cooldownUntil) {
-          this.armedUntil = 0;
-          this.cooldownUntil = t + o.selectCooldownMs;
-          this.steadySince = null;
-          return { event: "select", status: "held", progress: 1 };
-        }
-        return { event: null, status: "holding", progress: Math.min(1, held / o.steadyMs) };
+      if (this.burstStart === null) {
+        this.burstStart = t;
+        this.burstFrames = 0;
+        this.burstTooLong = false;
       }
-      return { event: null, status: "steady", progress: 0 };
+      this.burstFrames += 1;
+      if (t - this.burstStart > o.burstMaxMs) this.burstTooLong = true;
+      return { event: null, status: "moving", progress: 0 };
     }
   }
 
@@ -119,7 +111,7 @@ const WayfinderVisionCore = (() => {
         return {
           kind: "arm",
           cursor,
-          note: "Confirmation waiting. Hold still to confirm, or move twice to decline.",
+          note: "Confirmation waiting. A long deliberate move confirms, or move twice to decline.",
         };
       }
       if (!count) return { kind: "none", note: "No options to move through." };
@@ -176,6 +168,7 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     const core = WayfinderVisionCore;
 
     const toggle = document.querySelector("#vision-toggle");
+    const offButton = document.querySelector("#vision-off");
     const muteButton = document.querySelector("#vision-mute");
     const chip = document.querySelector("#chip-camera");
     const stateNode = document.querySelector("#vision-state");
@@ -193,7 +186,10 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     const BOX = { x: 0.25, y: 0.08, w: 0.5, h: 0.84 };
 
     let on = false;
+    let starting = false;
     let paused = false;
+    // Bumped by an explicit off so a permission request still in flight cannot turn the camera back on.
+    let cameraToken = 0;
     let blocked = false;
     let stream = null;
     let timer = null;
@@ -225,11 +221,19 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     function report() {
       const status = cameraStatus();
       const words = {
-        available: "CAMERA: off. Press C to arm",
-        armed: "CAMERA: live (laptop webcam)",
-        muted: "CAMERA: muted",
-        blocked: "CAMERA: blocked by the browser",
-        unsupported: "CAMERA: not supported here",
+        available: "CAMERA off",
+        armed: "CAMERA on",
+        muted: "CAMERA muted",
+        blocked: "CAMERA blocked",
+        unsupported: "CAMERA not supported here",
+      };
+      const motion = "A clear nod or wave moves to the next choice. Holding still does not choose.";
+      const live = {
+        available: "CAMERA off.",
+        armed: "CAMERA on.",
+        muted: "CAMERA on.",
+        blocked: "Camera permission was denied. The camera stays off.",
+        unsupported: "CAMERA not supported in this browser.",
       };
       if (chip) {
         chip.textContent = words[status];
@@ -238,7 +242,13 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       muteButton.hidden = !on;
       muteButton.textContent = paused ? "Unmute camera" : "Mute camera";
       muteButton.setAttribute("aria-pressed", String(paused));
-      toggle.textContent = on ? "Camera off" : "Arm camera";
+      // Arm stays pressed while the camera is on. Denial leaves it unpressed.
+      toggle.setAttribute("aria-pressed", on ? "true" : "false");
+      toggle.textContent = on ? "Camera on" : "Arm camera";
+      app.setCaptureStatus({
+        camera: live[status],
+        motion: status === "armed" || status === "muted" ? motion : "",
+      });
       app.reportChannel({ camera: status });
     }
 
@@ -247,7 +257,7 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       if (stream) stream.getTracks().forEach((track) => (track.enabled = !paused));
       previous = null;
       if (paused) setState("Camera muted. Nothing is being watched. Unmute it to move and choose by looking.");
-      else setState("Camera unmuted. Laptop-camera demo, not gaze tracking. Nod once to move.");
+      else setState("Camera unmuted. Laptop-camera demo, not gaze tracking. A clear nod moves to the next choice.");
       report();
     }
 
@@ -279,7 +289,7 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       const state = app.state();
       if (!state) return;
       if (state.pending_confirmation) {
-        cursorNode.textContent = `Confirmation waiting: ${state.pending_confirmation.label}. Move once, then hold still to confirm. Move twice quickly to decline.`;
+        cursorNode.textContent = `Confirmation waiting: ${state.pending_confirmation.label}. A long deliberate move confirms. Two quick moves decline. Or tap Yes or No.`;
       } else {
         cursorNode.textContent = describeCursor(state, getCursor());
       }
@@ -305,13 +315,13 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       });
       if (signal === "next") lastNextAt = now;
       if (plan.kind === "move") {
-        setState("Move seen. Next option.");
+        setState("Clear move. Next option.");
         await app.moveCursor(plan.cursor, "camera");
         showCursor();
       } else if (plan.kind === "select") {
         setCursor(plan.cursor);
         const label = state.branches[plan.cursor] ? state.branches[plan.cursor].label : "option";
-        setState(`Held still. Chose: ${label}.`);
+        setState(`Long move. Chose: ${label}.`);
         await send({ action_id: plan.actionId });
         showCursor();
       } else if (plan.kind === "confirm") {
@@ -371,10 +381,9 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     const STATUS_TEXT = {
       absent: "No face seen in the box. Nothing will be chosen. Move into the box.",
       ignored: "The picture jumped (light change or the camera moved). Ignored.",
-      moving: "Moving. If this is a nod, stop and hold still.",
-      settling: "That movement was too short or too long to count. Hold still, then try one clear nod.",
-      steady: "Steady. Nod once to move to the next option. Holding still alone does nothing.",
-      holding: "Move seen. Keep holding still to choose the highlighted option.",
+      moving: "Large move. A short one goes to the next choice. A longer one chooses it.",
+      settling: "That movement was too small, too short, or too long. Nothing was chosen.",
+      steady: "CAMERA on. A clear nod or wave moves to the next choice. Holding still does nothing.",
     };
 
     function frame() {
@@ -413,6 +422,14 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     }
 
     async function start() {
+      // Already on, or a permission request is in flight. Never stop from this path.
+      if (on || starting) return;
+      if (blocked) {
+        setState("Camera permission was denied. The camera stays off. Nothing is being captured.");
+        toggle.setAttribute("aria-pressed", "false");
+        report();
+        return;
+      }
       if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
         setState(
           "This browser cannot open a camera here. It needs getUserMedia on localhost or https. " +
@@ -420,6 +437,8 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
         );
         return;
       }
+      const mine = ++cameraToken;
+      starting = true;
       setState("Asking for the laptop camera. Allow it if the browser asks.");
       try {
         stream = await navigator.mediaDevices.getUserMedia({
@@ -428,16 +447,26 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
         });
       } catch (error) {
         const denied = error && (error.name === "NotAllowedError" || error.name === "SecurityError");
-        setState(
-          denied
-            ? "Camera permission was denied. Nothing is being captured, and the camera selector is off. The page, voice, and typed commands still work."
-            : `The camera could not be opened (${error && error.name ? error.name : "unknown error"}). Nothing is being captured, and the camera selector is off.`,
-        );
+        starting = false;
+        on = false;
         stream = null;
         blocked = Boolean(denied);
+        toggle.setAttribute("aria-pressed", "false");
+        setState(
+          denied
+            ? "Camera permission was denied. The camera stays off. Nothing is being captured."
+            : `The camera could not be opened (${error && error.name ? error.name : "unknown error"}). The camera stays off. Nothing is being captured.`,
+        );
         report();
         return;
       }
+      if (mine !== cameraToken) {
+        starting = false;
+        stream.getTracks().forEach((track) => track.stop());
+        stream = null;
+        return;
+      }
+      starting = false;
       blocked = false;
       paused = false;
       video.srcObject = stream;
@@ -465,8 +494,8 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       }
       setState(
         detector
-          ? "Camera on. Laptop-camera demo, not gaze tracking. A face check is running. Put your face in the box, then nod once to move."
-          : "Camera on. Laptop-camera demo, not gaze tracking. This browser has no Face Detector, so a fixed box is used and nobody checks that a face is in it. Put your face in the box, then nod once to move.",
+          ? "CAMERA on. A clear nod or wave moves to the next choice. Holding still does nothing. A face check is running. This is not gaze tracking."
+          : "CAMERA on. A clear nod or wave moves to the next choice. Holding still does nothing. This browser has no Face Detector, so a fixed box is used. This is not gaze tracking.",
       );
       timer = window.setInterval(frame, 90);
       if (detector) detectTimer = window.setInterval(detectLoop, 300);
@@ -475,7 +504,9 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     }
 
     function stop(message) {
+      cameraToken += 1;
       on = false;
+      starting = false;
       paused = false;
       if (timer) window.clearInterval(timer);
       if (detectTimer) window.clearInterval(detectTimer);
@@ -492,19 +523,28 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
       report();
     }
 
-    toggle.addEventListener("click", () => {
-      if (on) stop("Camera is off. The camera selector is stopped. Nothing was recorded.");
-      else start();
+    toggle.addEventListener("click", () => start());
+    offButton.addEventListener("click", () => {
+      // The gesture that arms capture must not also run this stop.
+      if (app.armingGesture()) return;
+      if (!on && !starting) {
+        setState("Camera is already off.");
+        return;
+      }
+      stop("Camera is off. Nothing is being captured.");
     });
-    muteButton.addEventListener("click", () => setPaused(!paused));
+    muteButton.addEventListener("click", () => {
+      if (app.armingGesture()) return;
+      if (!on) return;
+      setPaused(!paused);
+    });
     window.addEventListener("keydown", (event) => {
       if (event.metaKey || event.ctrlKey || event.altKey || event.repeat) return;
       const tag = event.target.tagName;
       if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
       if (event.key.toLowerCase() === "c") {
         event.preventDefault();
-        if (on) stop("Camera is off. The camera selector is stopped. Nothing was recorded.");
-        else start();
+        start();
       }
     });
 
@@ -515,6 +555,7 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     document.addEventListener("wayfinder:render", (event) => {
       setCursor(event.detail.branch_cursor ? event.detail.branch_cursor.index : 0);
       if (on) showCursor();
+      report();
     });
     report();
 
@@ -527,6 +568,7 @@ if (typeof document !== "undefined" && window.WayfinderApp) {
     // active only while "Use by looking" is on.
     window.WayfinderVision = {
       cameraStatus,
+      arm: start,
       handleDeviceEvent(payload) {
         if (!on || paused) return null;
         const signal = mapper.feed(payload);

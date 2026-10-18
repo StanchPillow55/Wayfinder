@@ -7,7 +7,14 @@ function text(id, value) {
   document.querySelector(id).textContent = value;
 }
 
+// A tap, a new command, or the start of speech cuts off the sentence. The session stays.
+function cancelSpeech() {
+  if (window.WayfinderVoice && window.WayfinderVoice.barge) window.WayfinderVoice.barge(true);
+  else if ("speechSynthesis" in window) window.speechSynthesis.cancel();
+}
+
 async function turn(body) {
+  cancelSpeech();
   const response = await fetch(`/api/sessions/${state.session_id}/turns`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -26,8 +33,46 @@ async function post(url, body) {
   return response.json();
 }
 
+// Capture status is words only. It stays in #channel-live across re-renders.
+const captureStatus = { mic: "MIC off.", camera: "CAMERA off.", motion: "" };
+let captureArmed = false;
+let armGesture = false;
+
+function captureSentence() {
+  return [captureStatus.mic, captureStatus.camera, captureStatus.motion].filter(Boolean).join(" ");
+}
+
+function paintLive() {
+  const status = captureSentence();
+  const node = document.querySelector("#channel-live");
+  if (node) node.textContent = status;
+  if (!state) return;
+  live.textContent = state.speech;
+}
+
+function setCaptureStatus(partial) {
+  Object.assign(captureStatus, partial);
+  paintLive();
+}
+
+function armingGesture() {
+  return armGesture;
+}
+
+function armFromGesture() {
+  if (captureArmed) return;
+  captureArmed = true;
+  armGesture = true;
+  if (window.WayfinderVoice && window.WayfinderVoice.arm) window.WayfinderVoice.arm();
+  if (window.WayfinderVision && window.WayfinderVision.arm) window.WayfinderVision.arm();
+}
+
+function clearArmGesture() {
+  armGesture = false;
+}
+
 function render() {
-  live.textContent = state.speech || "";
+  paintLive();
   text("#purpose", state.page.purpose);
   text("#summary", state.page.summary);
   const goal = state.goal.constraints.length
@@ -57,6 +102,7 @@ function render() {
     risk.className = "risk";
     risk.textContent = `${branch.risk_label}. ${branch.rationale}`;
     button.append(name, risk);
+    // Same choice as saying "do number N", and it barges in while speech or the mic is active.
     button.addEventListener("click", () => turn({ action_id: branch.id }));
     li.append(button);
     branches.append(li);
@@ -157,6 +203,9 @@ function render() {
     unsupported: "Market poster, an unsupported page",
     public: "A public page, best effort",
     url: "A web address you entered",
+    shop: "Access shop, a local commerce mirror",
+    jobs: "Community jobs board, a local mirror",
+    unlabeled: "Help desk with unlabeled controls",
     fixture: "Harbor Line, the offline fixture",
   };
   text("#target-status", `Open page: ${labels[state.target] || state.target}. Adapter: ${state.adapter}.`);
@@ -244,12 +293,87 @@ function render() {
     text("#confirm-text", "");
     if (focusedInside) command.focus();
   }
+  if (window.WayfinderShell) window.WayfinderShell.render(state);
   document.dispatchEvent(new CustomEvent("wayfinder:render", { detail: state }));
+  flushChannels();
+}
+
+// Mic and camera status words (never media) are told to the Mac so the session view agrees with the page.
+let pendingChannels = {};
+function reportChannel(update) {
+  pendingChannels = { ...pendingChannels, ...update };
+  flushChannels();
+}
+let flushing = false;
+async function flushChannels() {
+  if (flushing || !state || !Object.keys(pendingChannels).length) return;
+  const body = pendingChannels;
+  pendingChannels = {};
+  flushing = true;
+  try {
+    await fetch(`/api/sessions/${state.session_id}/channels`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  } catch (_error) {
+    // Status only. The next change retries.
+  } finally {
+    flushing = false;
+  }
+}
+
+// One shared highlight for voice, camera, and switches. The Mac holds it, so Braille and the glance follow.
+async function moveCursor(index, source) {
+  const response = await fetch(`/api/sessions/${state.session_id}/cursor`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ index, source }),
+  });
+  if (!response.ok) return;
+  state = await response.json();
+  render();
+}
+
+async function setPreferences(body) {
+  const response = await fetch(`/api/sessions/${state.session_id}/preferences`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (response.ok) {
+    state = await response.json();
+    render();
+  }
+}
+
+async function sessionAction(path, body) {
+  const response = await fetch(`/api/sessions/${state.session_id}/${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+  });
+  if (response.ok) {
+    state = await response.json();
+    render();
+  }
+  return response.ok;
 }
 
 // A narrow hook for the hands-free modes (voice.js, vision.js). They use the same
 // turn and open-page calls as the buttons, so confirmation is still enforced by the session.
-window.WayfinderApp = { state: () => state, turn, openTarget };
+window.WayfinderApp = {
+  state: () => state,
+  turn,
+  openTarget,
+  moveCursor,
+  setPreferences,
+  reportChannel,
+  sessionAction,
+  cancelSpeech,
+  setCaptureStatus,
+  armingGesture,
+};
 
 WayfinderBraille.init();
 WayfinderTactile.init();
@@ -272,7 +396,10 @@ document.querySelectorAll("[data-command]").forEach((button) => {
   button.addEventListener("click", () => turn({ text: button.dataset.command }));
 });
 
-document.querySelector("#stop").addEventListener("click", () => turn({ text: "stop" }));
+document.querySelector("#stop").addEventListener("click", () => {
+  cancelSpeech();
+  turn({ text: "stop" });
+});
 document.querySelector("#confirm-yes").addEventListener("click", () => turn({ text: "yes" }));
 document.querySelector("#confirm-no").addEventListener("click", () => turn({ text: "no" }));
 
@@ -352,7 +479,11 @@ async function openTarget(target, url) {
   const response = await fetch("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(url ? { target: "url", url } : { target }),
+    body: JSON.stringify({
+      ...(url ? { target: "url", url } : { target }),
+      // The same goal, path, and preferences carry into the new page.
+      ...(state ? { continue_from: state.session_id } : {}),
+    }),
   });
   if (!response.ok) {
     const failure = await response.json().catch(() => ({}));
@@ -378,6 +509,19 @@ document.querySelector("#url-form").addEventListener("submit", (event) => {
   }
   openTarget("url", address);
 });
+
+document.addEventListener("pointerdown", (event) => {
+  const target = event.target;
+  const interrupts = target && target.closest && target.closest(
+    "#branches .branch, #stop, [data-command], #confirm-yes, #confirm-no, #command-form button",
+  );
+  if (interrupts && window.WayfinderVoice && window.WayfinderVoice.barge) window.WayfinderVoice.barge(true);
+  armFromGesture();
+}, true);
+document.addEventListener("keydown", armFromGesture, true);
+// Bubble runs after the control's own click, so the arming gesture cannot also turn the camera off.
+document.addEventListener("click", clearArmGesture, false);
+document.addEventListener("keyup", clearArmGesture, false);
 
 async function boot() {
   const wanted = new URLSearchParams(window.location.search).get("target") || "faq";

@@ -53,6 +53,7 @@ VOICE_CASES = [
     ("number three", "number", None, 3),
     ("2", "number", None, 2),
     ("option five", "number", None, 5),
+    ("do number 2", "number", None, 2),
     ("explain", "command", None, None),
     ("less detail", "command", None, None),
     ("", "unknown", None, None),
@@ -292,24 +293,28 @@ function run(frames, options) {
   return events.map((e) => e[0]);
 }
 
-// Nod (0.3 s of motion) then hold still 3 s: one next, then one select.
-results.nodThenHold = run([[500, 1], [300, 25], [3000, 1]]);
+// A clear nod (0.4 s, large) then holding still: next only. Stillness does not choose.
+results.nodThenHold = run([[500, 1], [400, 40], [3000, 1]]);
 // Holding still with no nod: nothing, even for a minute.
 results.holdOnly = run([[60000, 1]]);
-// A single frame of motion is noise, not a nod.
-results.oneFrame = run([[500, 1], [100, 25], [3000, 1]]);
+// A single frame of motion is a blink, not a nod.
+results.oneFrame = run([[500, 1], [100, 40], [3000, 1]]);
+// An expression-sized change, then a still face: nothing. It must not select.
+results.expression = run([[500, 1], [500, 12], [3000, 1]]);
+// Ambiguous motion, between a twitch and a nod: nothing.
+results.ambiguous = run([[500, 1], [600, 18], [2500, 1]]);
 // Walking around for 3 s is not a nod.
-results.longMotion = run([[500, 1], [3000, 25], [3000, 1]]);
+results.longMotion = run([[500, 1], [3000, 40], [3000, 1]]);
 // A camera bump or light jump is ignored.
 results.jump = run([[500, 1], [300, 200], [3000, 1]]);
-// Nod, hold: select; keep holding: no second select without a new nod.
-results.noRepeat = run([[500, 1], [300, 25], [9000, 1]]);
-// Two nods then hold: two nexts, one select.
-results.twoNods = run([[500, 1], [300, 25], [800, 1], [300, 25], [3000, 1]]);
-// Face absent after a nod: no select.
-results.absent = run([[500, 1], [300, 25], [100, 1], [3000, 1, false]]);
-// Too long after the nod: the arm expires.
-results.expired = run([[500, 1], [300, 25], [9000, 1]], { steadyMs: 12000 });
+// One nod, then keep holding: no select from stillness.
+results.noRepeat = run([[500, 1], [400, 40], [9000, 1]]);
+// Two clear nods: two nexts. The still gap between them does not select.
+results.twoNods = run([[500, 1], [400, 40], [800, 1], [400, 40], [3000, 1]]);
+// A longer large move chooses. Stillness is not required.
+results.longChoose = run([[500, 1], [800, 40], [400, 1]]);
+// Face absent after a nod: the nod can count, and absence does not select.
+results.absent = run([[500, 1], [400, 40], [100, 1], [3000, 1, false]]);
 
 results.energyShift = core.frameEnergy([10, 20, 30], [60, 70, 80]);
 results.energyMove = core.frameEnergy([0, 0, 0, 0], [100, 100, 100, 100]);
@@ -334,15 +339,17 @@ console.log(JSON.stringify(results));
     )
     assert run.returncode == 0, run.stderr
     r = json.loads(run.stdout)
-    assert r["nodThenHold"] == ["next", "select"]
+    assert r["nodThenHold"] == ["next"]
     assert r["holdOnly"] == []
     assert r["oneFrame"] == []
+    assert r["expression"] == []
+    assert r["ambiguous"] == []
     assert r["longMotion"] == []
     assert r["jump"] == []
-    assert r["noRepeat"] == ["next", "select"]
-    assert r["twoNods"] == ["next", "next", "select"]
+    assert r["noRepeat"] == ["next"]
+    assert r["twoNods"] == ["next", "next"]
+    assert r["longChoose"] == ["select"]
     assert r["absent"] == ["next"]
-    assert r["expired"] == ["next"]
     assert r["energyShift"] == 0  # a brightness shift alone is not motion
     assert r["energyMove"] == 0  # uniform brightening is a global shift
     assert r["energyChange"] > 30

@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
 import threading
 import time
-from typing import Any
+from contextvars import ContextVar
+from typing import Any, Iterator
+
+_STAGE_SOURCES = frozenset({"interpreter", "ranker", "router", "policy", "executor", "verifier"})
+
+_sentry_active = False
+_turn_transaction: ContextVar[Any | None] = ContextVar("wayfinder_sentry_turn", default=None)
 
 from wayfinder.contracts import PROTOCOL_VERSION, WIR_VERSION
 
@@ -115,6 +122,96 @@ def trace_event(
 _sink_lock = threading.Lock()
 
 
+def sentry_initialized() -> bool:
+    """True only after api.py successfully called sentry_sdk.init."""
+    return _sentry_active
+
+
+def mark_sentry_active() -> None:
+    """Called from api.py after sentry_sdk.init succeeds."""
+    global _sentry_active
+    _sentry_active = True
+
+
+@contextlib.contextmanager
+def sentry_turn(*, trace_id: str, session_id: str, turn_id: str) -> Iterator[None]:
+    """One performance transaction per orchestrator turn. No-op without Sentry."""
+    if not _sentry_active:
+        yield
+        return
+    try:
+        import sentry_sdk
+    except ImportError:
+        yield
+        return
+    with sentry_sdk.start_transaction(op="wayfinder.turn", name="wayfinder.turn") as transaction:
+        transaction.set_tag("trace_id", trace_id)
+        transaction.set_tag("session_id", session_id)
+        transaction.set_tag("turn_id", turn_id)
+        token = _turn_transaction.set(transaction)
+        try:
+            yield
+        finally:
+            _turn_transaction.reset(token)
+
+
+@contextlib.contextmanager
+def sentry_model_span() -> Iterator[None]:
+    """Span for removable model summary and rank calls."""
+    if not _sentry_active:
+        yield
+        return
+    try:
+        import sentry_sdk
+    except ImportError:
+        yield
+        return
+    with sentry_sdk.start_span(op="wayfinder.model", name="wayfinder.model"):
+        yield
+
+
+def sentry_capture_exception(exc: BaseException) -> None:
+    """Report an exception without changing local fallback behavior."""
+    if not _sentry_active:
+        return
+    try:
+        import sentry_sdk
+    except ImportError:
+        return
+    try:
+        sentry_sdk.capture_exception(exc)
+    except Exception:
+        return
+
+
+def _bridge_sentry_event(event: dict[str, Any]) -> None:
+    if not _sentry_active:
+        return
+    source = str(event.get("source") or event.get("component") or "")
+    if source not in _STAGE_SOURCES:
+        return
+    try:
+        import sentry_sdk
+    except ImportError:
+        return
+    action = str(event.get("action") or event.get("action_type") or "stage")
+    status = str(event.get("status") or event.get("result_class") or "")
+    parent = _turn_transaction.get()
+    span_cm: Any
+    if parent is not None:
+        span_cm = parent.start_child(op=f"wayfinder.{source}", description=action)
+    else:
+        span_cm = sentry_sdk.start_span(op=f"wayfinder.{source}", description=action)
+    try:
+        with span_cm as span:
+            span.set_tag("status", status)
+            span.set_tag("trace_id", event.get("trace_id", ""))
+            if event.get("latency_ms") is not None:
+                span.set_data("latency_ms", event["latency_ms"])
+    except Exception:
+        return
+
+
 def export_event(event: dict[str, Any]) -> bool:
     """Append one redacted event as a JSON line when WAYFINDER_TRACE_FILE is set.
 
@@ -122,6 +219,7 @@ def export_event(event: dict[str, Any]) -> bool:
     and it is not Sentry. A collector such as Sentry Logs, a file shipper, or a
     notebook can read the file. Returns True when a line was written.
     """
+    _bridge_sentry_event(event)
     path = os.environ.get("WAYFINDER_TRACE_FILE", "").strip()
     if not path:
         return False

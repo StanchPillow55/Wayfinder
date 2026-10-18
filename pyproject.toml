@@ -12,6 +12,8 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["httpx>=0.27", "pytest>=8", "playwright>=1.49"]
 serial = ["pyserial>=3.5"]
+fetch = ["uagents>=0.15"]
+sentry = ["sentry-sdk>=2"]
 
 [project.scripts]
 wayfinder = "wayfinder.api:main"

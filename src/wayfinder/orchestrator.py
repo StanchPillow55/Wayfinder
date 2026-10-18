@@ -7,13 +7,14 @@ import uuid
 
 from wayfinder import capabilities, conversation, semantic
 from wayfinder.browser.bridge import BrowserUnavailable
-from wayfinder.browser.families import PageObservation, entry_control, failure_observation, normalize_url
+from wayfinder.browser.families import PageObservation, add_controls, entry_control, failure_observation, normalize_url
 from wayfinder.contracts import ADR_ID, BOX3_ID, DEVKIT_ID, P4_ID
 from wayfinder.demo_site import build_snapshot
 from wayfinder.devices import DispatchResult
 from wayfinder.executor import execute
 from wayfinder.gateway import constraints_in, parse
 from wayfinder.interpreter import interpret
+from wayfinder.model_backend import model_enabled, model_rank, model_summary
 from wayfinder.models import (
     A11yNode,
     AgentEnvelope,
@@ -25,10 +26,17 @@ from wayfinder.models import (
     TopologyError,
     parse_device_message,
 )
-from wayfinder.observability import export_event, trace_event
+from wayfinder.observability import export_event, sentry_turn, trace_event
 from wayfinder.policy import decide
 from wayfinder.ranker import rank
-from wayfinder.renderers import glance_payload, grade1_braille, narrate_result, orientation_speech
+from wayfinder.renderers import (
+    glance_payload,
+    grade1_braille,
+    narrate_result,
+    orientation_speech,
+    salient_outcome,
+    still_on_page,
+)
 from wayfinder.router import UnknownCapability, route
 from wayfinder.state import Session, get_runtime, runtime
 from wayfinder.models import Verification
@@ -222,6 +230,18 @@ def _session(session_id: str) -> Session:
 def _turn(session: Session, text: str | None, action_id: str | None, channel: str) -> dict:
     turn_id = uuid.uuid4().hex
     trace_id = uuid.uuid4().hex
+    with sentry_turn(trace_id=trace_id, session_id=session.id, turn_id=turn_id):
+        return _turn_body(session, text, action_id, channel, turn_id, trace_id)
+
+
+def _turn_body(
+    session: Session,
+    text: str | None,
+    action_id: str | None,
+    channel: str,
+    turn_id: str,
+    trace_id: str,
+) -> dict:
     events: list[dict] = []
     session.last_verification = None
     session.last_decision = None
@@ -423,6 +443,23 @@ def _turn(session: Session, text: str | None, action_id: str | None, channel: st
     return _finish(session, speech, turn_id, trace_id, events)
 
 
+def _apply_model(wir, snapshot, controls, session, branches):
+    """Replace summary text and branch order when a model backend is selected.
+
+    WAYFINDER_MODEL=off returns the deterministic branches and leaves the summary alone.
+    """
+    if not model_enabled():
+        return branches
+    wir.page["summary"] = model_summary(snapshot, session.goal, session.density)
+    return model_rank(
+        controls,
+        session.goal.constraints,
+        session.goal,
+        session.density,
+        session.branch_limit,
+    )
+
+
 def _reorient(session: Session, turn_id: str, trace_id: str, events: list[dict], prefix: str) -> dict:
     if session.mode == "browser":
         return _reorient_browser(session, turn_id, trace_id, events, prefix)
@@ -443,6 +480,7 @@ def _reorient(session: Session, turn_id: str, trace_id: str, events: list[dict],
         density=session.density,
     )
     branches = rank(snapshot.controls, session.goal.constraints, session.density, session.branch_limit)
+    branches = _apply_model(wir, snapshot, snapshot.controls, session, branches)
     wir.actions = branches
     session.wir = wir
     session.branches = branches
@@ -678,6 +716,7 @@ def _commit(
         density=session.density,
     )
     branches = rank(snapshot.controls, session.goal.constraints, session.density, session.branch_limit)
+    branches = _apply_model(wir, snapshot, snapshot.controls, session, branches)
     wir.actions = branches
     session.wir = wir
     session.branches = branches
@@ -701,21 +740,18 @@ def _commit(
         confirmation_outcome="confirmed" if confirmed else "not_required",
     )
     if verification.status == "SUCCESS":
-        runtime.remember(session, f"{control.label} Verification: SUCCESS.")
-        conversation.note(session, "read" if control.informational else "choice", f"{'Read' if control.informational else 'Chose'}: {control.label} ({verification.status.lower()})")
+        runtime.remember(session, f"Chose {control.label}.")
+        conversation.note(session, "read" if control.informational else "choice", f"{'Read' if control.informational else 'Chose'}: {control.label}.")
         token = "action_verified" if result.changed else "orient"
         label = "Verified state change" if result.changed else "Read verified"
-        speech = f"Verification: SUCCESS. {orientation_speech(snapshot.summary, branches, session.density)}"
+        speech = narrate_result(salient_outcome(control, verification, snapshot.summary), branches, session.density)
     else:
         token = "failure"
         label = "Verification failed"
         if result.error_class == "selector_not_found":
-            speech = "That control is not on the page. Verification: FAILURE. Nothing changed."
+            speech = narrate_result("That control is not on the page. Nothing changed.", branches, session.density)
         else:
-            speech = (
-                f"Verification: {verification.status}. {verification.detail} "
-                "The claimed page change was not accepted."
-            )
+            speech = narrate_result(still_on_page(snapshot.summary), branches, session.density)
     _publish(session, events, trace_id, turn_id, token, label)
     return _finish(session, speech, turn_id, trace_id, events)
 
@@ -1065,6 +1101,13 @@ def _braille_view(speech: str) -> dict:
     }
 
 
+def _page_summary_for_view(session: Session, deterministic: str) -> str:
+    """UI page summary: deterministic snapshot text unless a model backend rewrote WIR."""
+    if model_enabled() and session.wir is not None:
+        return str(session.wir.page.get("summary") or deterministic)
+    return deterministic
+
+
 def _page_view(session: Session, snapshot: Snapshot) -> dict:
     session_fallback = session.fallback_reason
     if session.mode == "browser" and session.observation is not None:
@@ -1073,7 +1116,7 @@ def _page_view(session: Session, snapshot: Snapshot) -> dict:
             "url": observation.url,
             "title": observation.title,
             "purpose": observation.purpose,
-            "summary": observation.summary,
+            "summary": _page_summary_for_view(session, observation.summary),
             "view": observation.family,
             "step_free_only": False,
             "alert": "none",
@@ -1096,7 +1139,7 @@ def _page_view(session: Session, snapshot: Snapshot) -> dict:
         "url": snapshot.url,
         "title": snapshot.title,
         "purpose": snapshot.purpose,
-        "summary": snapshot.summary,
+        "summary": _page_summary_for_view(session, snapshot.summary),
         "view": snapshot.view,
         "step_free_only": snapshot.step_free_only,
         "alert": snapshot.alert,
@@ -1213,6 +1256,7 @@ def _reorient_browser(session: Session, turn_id: str, trace_id: str, events: lis
         density=session.density,
     )
     branches = rank(controls, session.goal.constraints, session.density, session.branch_limit)
+    branches = _apply_model(wir, snapshot, controls, session, branches)
     wir.actions = branches
     session.wir = wir
     session.branches = branches
@@ -1286,7 +1330,12 @@ def _commit_browser(
 ) -> dict:
     fresh = _observe(session)
     stamp, _, recipe = control.semantic_target.partition("|")
-    current_ids = {item.id for item in fresh.controls}
+    # The page plan shows one add button, but a goal may name any add button. Each is grounded in this
+    # same fresh read, so it is as trustworthy as a listed option and still goes through the policy gate.
+    grounded = {item.id: item for item in fresh.controls}
+    for extra in add_controls(fresh):
+        grounded.setdefault(extra.id, extra)
+    current_ids = set(grounded)
     typed = control.id.startswith("enter-") and control.id not in current_ids
     if control.capability.startswith("browser.") and control.id not in current_ids and not typed:
         _emit(session, events, trace_id, turn_id, "orchestrator", "invalid_branch", "rejected", evidence_ref=fresh.evidence_ref)
@@ -1298,7 +1347,7 @@ def _commit_browser(
         _publish(session, events, trace_id, turn_id, "failure", "Stale option")
         return _finish(session, "That option is out of date. The page was re-read and left unchanged.", turn_id, trace_id, events)
     if control.id in current_ids:
-        control = next(item for item in fresh.controls if item.id == control.id)
+        control = grounded[control.id]
         _, _, recipe = control.semantic_target.partition("|")
     try:
         chosen = route(control)
@@ -1459,6 +1508,7 @@ def _commit_browser(
         density=session.density,
     )
     branches = rank(controls, session.goal.constraints, session.density, session.branch_limit)
+    branches = _apply_model(wir, snapshot, controls, session, branches)
     wir.actions = branches
     session.wir = wir
     session.branches = branches
@@ -1482,22 +1532,19 @@ def _commit_browser(
         confirmation_outcome="confirmed" if confirmed else "not_required",
     )
     if verification.status == "SUCCESS":
-        runtime.remember(session, f"{control.label} Verification: SUCCESS.")
-        conversation.note(session, "read" if control.informational else "choice", f"{'Read' if control.informational else 'Chose'}: {control.label} ({verification.status.lower()})")
+        runtime.remember(session, f"Chose {control.label}.")
+        conversation.note(session, "read" if control.informational else "choice", f"{'Read' if control.informational else 'Chose'}: {control.label}.")
         token = "action_verified" if result.changed else "orient"
         label = "Verified state change" if result.changed else "Read verified"
         lead = _browser_lead(control, recipe, verification, after)
-        speech = f"Verification: SUCCESS. {narrate_result(lead, branches, session.density)}".replace("  ", " ")
+        speech = narrate_result(lead, branches, session.density)
     else:
         token = "failure"
         label = "Verification failed"
         if result.error_class == "selector_not_found":
-            speech = "That control is not on the page. Verification: FAILURE. Nothing changed."
+            speech = narrate_result("That control is not on the page. Nothing changed.", branches, session.density)
         else:
-            speech = (
-                f"Verification: {verification.status}. {verification.detail} "
-                "The claimed page change was not accepted."
-            )
+            speech = narrate_result(still_on_page(after.summary, after.status), branches, session.density)
     _publish(session, events, trace_id, turn_id, token, label)
     return _finish(session, speech, turn_id, trace_id, events)
 

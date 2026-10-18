@@ -8,10 +8,10 @@ event, into a small command the existing session API will gate.
 
 Rules that hold on both input paths:
 
-- Confirmation is never skipped. A spoken or looked-at signal can choose an option.
-  Whether that option needs confirmation is decided by the session. The word
-  ``confirm`` or a held-still signal on a waiting confirmation is a second, separate
-  signal.
+- Confirmation is never skipped. A spoken command or a clearly large camera
+  motion can choose an option. Whether that option needs confirmation is decided
+  by the session. The word ``confirm``, or a second separate select signal,
+  confirms. Becoming still after an expression is not a selection.
 - Text that looks like an instruction aimed at the assistant is rejected, never run.
 - A P4X-EYE ``scene_summary`` is untrusted free text. It maps to no action.
 - No frame, image, or media field is read or kept here.
@@ -100,7 +100,9 @@ _ENTER = (
     re.compile(r"^(?:set|fill in|fill|enter|type|put) .+ (?:to|with|as) .+$"),
 )
 _OPEN = re.compile(r"^(?:open|go to|show|load)(?: the)? (?P<t>[a-z ]+?)(?: page)?$")
-_NUMBER = re.compile(r"^(?:(?:number|option) )?(?P<n>[1-5]|one|two|three|four|five)$")
+_NUMBER = re.compile(
+    r"^(?:(?:do|choose|pick|press) )?(?:(?:number|option) )?(?P<n>[1-5]|one|two|three|four|five)$"
+)
 
 
 @dataclass(frozen=True)
@@ -232,7 +234,11 @@ def plan_signal(
         if pending:
             if recent_next:
                 return Plan("decline", cursor=cursor, post="no", note="Declined.")
-            return Plan("arm", cursor=cursor, note="Confirmation waiting. Hold still to confirm, or move twice to decline.")
+            return Plan(
+                "arm",
+                cursor=cursor,
+                note="Confirmation waiting. A long deliberate move confirms, or move twice to decline.",
+            )
         if count == 0:
             return Plan("none", note="No options to move through.")
         return Plan("move", cursor=(cursor + 1) % count)

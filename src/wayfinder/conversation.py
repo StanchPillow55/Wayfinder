@@ -228,17 +228,17 @@ def set_renderer(session: Session, renderer: str) -> str:
         raise ValueError("unknown_renderer")
     session.renderer = renderer
     spec = RENDERERS[renderer]
-    session.speech_muted = not spec["audio"]
+    # Which sensation leads. Speech keeps going, and the page and its choices stay.
     if renderer == "tactile":
-        tail = "Audio is off. Braille, the tactile cue, and the switches work."
+        tail = "Braille and the motor cue play along with the page. The choices stay on screen."
     elif renderer == "visual":
-        tail = "Audio is off. Cards, Braille, and the switches still work."
+        tail = "The page and the choices stay on screen. Speech can keep going."
     elif renderer == "hands_free":
-        tail = "Voice and camera are armed. Press once in the browser if it asks for permission."
+        tail = "Voice and camera are armed. The page and the choices stay on screen. Press once in the browser if it asks for permission."
     elif renderer == "audio":
-        tail = "Audio is on."
+        tail = "Speech is on. The page and the choices stay on screen."
     else:
-        tail = "Every output is on."
+        tail = "Speech, the page, Braille, and the motor cue are all on together."
     return f"Output set to {spec['label']}. {tail} Your goal and your path are kept."
 
 
@@ -363,7 +363,7 @@ def advance_goal(
         step["status"] = "verified" if ok else (verification.status.lower() if verification else "failed")
         if not ok:
             plan["status"] = "stuck"
-            lines.append(f"Step {number}: {control.label}. It did not verify, so I stopped. Nothing else was done.")
+            lines.append(f"Step {number}: {control.label}. That did not change the page, so I stopped. Nothing else was done.")
             break
         recipe = control.semantic_target.partition("|")[2]
         if control.id.startswith("add-"):
@@ -372,7 +372,7 @@ def advance_goal(
             plan["searched"] = True
         if recipe.startswith("filter:"):
             plan["used"].append(control.id)
-        lines.append(f"Step {number}: {control.label}. Verified.")
+        lines.append(f"Step {number}: {control.label}.")
     else:
         plan["status"] = "paused"
         lines.append(f"I took {goals.MAX_AUTO_STEPS} steps and paused. Say continue to go on, or stop.")
@@ -520,10 +520,16 @@ def explain_that(session: Session) -> str:
     if not record:
         return "There is nothing to explain yet. Ask what is here first."
     status = record.get("verification") or (session.last_verification.status if session.last_verification else "not checked")
+    checked = {
+        "SUCCESS": "The fresh read matched that action",
+        "PARTIAL": "Only part of the fresh read matched",
+        "FAILURE": "The fresh read did not match, so that change was not kept",
+        "AMBIGUOUS": "The fresh read was not clear, so nothing was assumed",
+    }.get(str(status), "The page was re-read")
     others = ", ".join(record.get("alternative_branches") or []) or "none"
     return (
         f"I chose {record['chosen_label']}. Policy said {record['policy_outcome']}. "
-        f"Risk class {record['risk_class']}. The page re-read result was {status}. "
+        f"Risk class {record['risk_class']}. {checked}. "
         f"Evidence: {record['evidence']}. Other options were: {others}."
     )
 

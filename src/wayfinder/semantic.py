@@ -17,10 +17,10 @@ RENDERERS = {
         "foreground": ["visual", "audio", "braille", "tactile", "glance"],
         "arm": [],
     },
-    "visual": {"label": "Visual", "audio": False, "foreground": ["visual", "glance"], "arm": []},
-    "audio": {"label": "Audio", "audio": True, "foreground": ["audio"], "arm": []},
-    "tactile": {"label": "Tactile and Braille", "audio": False, "foreground": ["braille", "tactile"], "arm": []},
-    "hands_free": {"label": "Hands-free", "audio": True, "foreground": ["audio"], "arm": ["voice", "camera"]},
+    "visual": {"label": "Visual", "audio": True, "foreground": ["visual", "glance", "audio"], "arm": []},
+    "audio": {"label": "Audio", "audio": True, "foreground": ["audio", "visual"], "arm": []},
+    "tactile": {"label": "Tactile and Braille", "audio": True, "foreground": ["braille", "tactile", "visual"], "arm": []},
+    "hands_free": {"label": "Hands-free", "audio": True, "foreground": ["audio", "visual"], "arm": ["voice", "camera"]},
 }
 
 

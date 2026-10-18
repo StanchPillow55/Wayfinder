@@ -128,16 +128,21 @@ def _recipe(control: Control) -> str:
     return control.semantic_target.partition("|")[2]
 
 
+_ACTION_VERB = re.compile(r"^(?:open|follow|go to)\s+", re.IGNORECASE)
+
+
 def control_text(observation: PageObservation, control: Control) -> str:
     kind, _, rest = _recipe(control).partition(":")
+    # "Open ..." is the action word Wayfinder adds, not page text. It must not match the synonym of "hours".
+    label = _ACTION_VERB.sub("", control.label)
     index = rest.partition("=")[0]
     if kind == "follow" and index.isdigit():
         link = next((item for item in observation.links if str(item.get("index")) == index), {})
-        return f"{control.label} {link.get('context') or ''} {link.get('href') or ''}"
+        return f"{label} {link.get('context') or ''} {link.get('href') or ''}"
     if kind == "activate" and index.isdigit():
         item = next((entry for entry in observation.details if str(entry.get("index")) == index), {})
         return f"{item.get('summary') or ''} {item.get('answer') or ''} {item.get('id') or ''}"
-    return control.label
+    return label
 
 
 def _sentences(text: str) -> list[str]:
@@ -262,7 +267,11 @@ def decide(spec: GoalSpec, observation: PageObservation, controls: list[Control]
                 score += 2
             if score and (best is None or score > best[0]):
                 best = (score, control)
-        elif control.capability == "browser.filter" and recipe.startswith("filter:") and not spec.adds:
+        elif (
+            control.capability == "browser.filter" and recipe.startswith("filter:") and not spec.adds
+            # An add button is only ever pressed for a goal that says add. "take me to the cart" must not add anything.
+            and not control.id.startswith("add-")
+        ):
             score = overlap(spec.keywords, control.label)
             if score and (best is None or score > best[0]) and control.id not in set(state.get("used") or []):
                 best = (score, control)

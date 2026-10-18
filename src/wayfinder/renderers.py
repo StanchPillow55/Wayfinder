@@ -5,6 +5,8 @@ Renderers do not change page state and do not choose browser actions.
 
 from __future__ import annotations
 
+import re
+
 from wayfinder.contracts import ACTUATOR, MOTOR_RUNS, POSES, angle_to_pulse
 from wayfinder.models import Control
 
@@ -72,34 +74,108 @@ def _first_sentence(text: str, limit: int = 160) -> str:
     return first[:limit]
 
 
-def _option_words(branches: list[Control], density: str) -> str:
-    """Options as spoken words. Brief names them; standard and full also flag a confirmation."""
-    parts = []
-    for index, branch in enumerate(branches, start=1):
+_STATUS_LEAK = re.compile(
+    r"verification\s*:\s*(?:SUCCESS|PARTIAL|FAILURE|AMBIGUOUS)\b\.?|"
+    r"\b(?:SUCCESS|PARTIAL|FAILURE|AMBIGUOUS)\b",
+    re.IGNORECASE,
+)
+_ROBOTIC_DETAILS = {
+    "the page matches the expected postcondition.",
+    "only part of the expected postcondition is true.",
+    "the page does not match the expected postcondition.",
+    "nothing was checked.",
+}
+
+
+def _strip_status_words(text: str) -> str:
+    """Verification status stays on the internal record. It is not spoken."""
+    return " ".join(_STATUS_LEAK.sub(" ", text or "").split()).strip()
+
+
+def _menu_name(label: str) -> str:
+    return " ".join(label.split()).strip().rstrip(".")
+
+
+def choice_menu(branches: list[Control], density: str) -> str:
+    """Phone-menu choices. The words are the real option labels."""
+    limit = 3 if density == "brief" else len(branches)
+    names = []
+    for branch in branches[:limit]:
         label = branch.label[:48] if density == "brief" else branch.label
-        flag = " Needs confirmation." if branch.risk_class == "consequential" and density != "brief" else ""
-        parts.append(f"{index}. {label}.{flag}")
-    return " ".join(parts)
+        name = _menu_name(label)
+        if branch.risk_class == "consequential" and density != "brief":
+            name = f"{name}, which asks first"
+        if name:
+            names.append(name)
+    if not names:
+        return "You can ask what is here."
+    if len(names) == 1:
+        return f"You can {names[0]}."
+    return "You can " + ", ".join(names[:-1]) + f", or {names[-1]}."
+
+
+def still_on_page(summary: str, status: str = "") -> str:
+    """What to say when a check did not pass: the page as it still is."""
+    status_text = _strip_status_words(status).strip().rstrip(".")
+    if status_text:
+        return f"The page still says {status_text}."
+    summary_text = _strip_status_words(summary)
+    if not summary_text:
+        return "The page is unchanged."
+    return _first_sentence(summary_text)
+
+
+def salient_outcome(control: Control, verification: object, summary: str) -> str:
+    """One plain sentence for a check that passed. No status word."""
+    observed = dict(getattr(verification, "observed", {}) or {})
+    if observed.get("alert") == "requested":
+        return "The arrival alert is requested."
+    if observed.get("step_free_only") is True:
+        return "Only step-free stations are shown."
+    if observed.get("step_free_only") is False and getattr(control, "id", "") == "clear_filter":
+        return "The step-free filter is cleared."
+    if observed.get("view") == "evening":
+        return "Evening departures are shown."
+    if observed.get("view") == "overview":
+        return "The daytime overview is shown."
+    detail = _strip_status_words(str(getattr(verification, "detail", "") or ""))
+    if detail and detail.lower() not in _ROBOTIC_DETAILS:
+        return detail if detail.endswith((".", "?", "!")) else detail + "."
+    summary_text = _strip_status_words(summary)
+    if summary_text:
+        parts = [part.strip() for part in summary_text.split(".") if part.strip()]
+        if parts:
+            return parts[-1] + "."
+    label = _strip_status_words(control.label).rstrip(".")
+    return f"{label}." if label else "Done."
 
 
 def orientation_speech(summary: str, branches: list[Control], density: str) -> str:
+    summary_text = _strip_status_words(summary)
+    menu = choice_menu(branches[:3] if density == "brief" else branches, density)
     if density == "full":
-        options = _option_words(branches, density)
         reasons = " ".join(f"{index}. {branch.rationale}" for index, branch in enumerate(branches, start=1))
-        return f"{summary} Options: {options} Why: {reasons}"
+        return f"{summary_text} {menu} Why: {reasons}".strip()
     if density == "brief":
-        return f"{_first_sentence(summary)} Options: {_option_words(branches[:3], density)}"
-    return f"{summary} Options: {_option_words(branches, density)}"
+        return f"{_first_sentence(summary_text)} {menu}".strip()
+    return f"{summary_text} {menu}".strip()
 
 
 def narrate_result(lead: str, branches: list[Control], density: str) -> str:
-    """What the person hears after an action. Density changes length, never meaning."""
+    """What the person hears after an action: what happened, then the next choices.
+
+    Density changes length, never meaning. A verification status is never included.
+    """
+    spoken = _strip_status_words(lead)
+    if spoken and not spoken.endswith((".", "?", "!")):
+        spoken += "."
+    menu = choice_menu(branches[:3] if density == "brief" else branches, density)
     if density == "brief":
-        return f"{_first_sentence(lead, 140)} Options: {_option_words(branches[:3], density)}"
+        spoken = _first_sentence(spoken, 140) if spoken else ""
     if density == "full":
         reasons = " ".join(f"{index}. {branch.rationale}" for index, branch in enumerate(branches, start=1))
-        return f"{lead} Options: {_option_words(branches, density)} Why: {reasons}"
-    return f"{lead} Options: {_option_words(branches, density)}"
+        return f"{spoken} {menu} Why: {reasons}".strip()
+    return f"{spoken} {menu}".strip()
 
 
 def _dots(*dots: int) -> int:
