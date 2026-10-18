@@ -1,0 +1,3 @@
+# Intentionally minimal. Console routing for the P4X-EYE Debug port is UNVERIFIED.
+# After the board enumerates, check `idf.py menuconfig` -> Component config -> ESP System Settings
+# -> Channel for console output, and record the working choice in docs/hardware/sprint.md.

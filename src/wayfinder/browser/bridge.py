@@ -12,6 +12,7 @@ import http.server
 import os
 import queue
 import threading
+import time
 from pathlib import Path
 from typing import Any, Callable
 
@@ -19,89 +20,194 @@ from wayfinder.browser.families import (
     PUBLIC_URL,
     TARGETS,
     PageObservation,
+    blocked_observation,
+    detect_blocker,
     failure_observation,
+    normalize_url,
     observe_from_dom,
+    unreachable_message,
 )
 from wayfinder.models import ExecResult
 
 PAGES = Path(__file__).resolve().parents[3] / "apps" / "pages"
 
-OBSERVE_JS = """
-() => {
-  const clean = (value, limit) => (value || "").trim().replace(/\\s+/g, " ").slice(0, limit);
-  const textOf = (el) => clean(el && (el.innerText || el.getAttribute("aria-label") || ""), 400);
-  const main = document.querySelector("main") || document.body;
+# One definition of "which element is number N" serves both the read and the act, so the
+# index in a recipe always points at the element that was described. Nothing is stamped
+# onto the page.
+COLLECT_JS = r"""
+const wfScope = () => document.querySelector("main, [role='main']") || document.body;
+const wfChromeSel = "nav, header, footer, aside, [role='navigation'], [role='banner'], [role='contentinfo'], [role='complementary']";
+const wfInChrome = (el) => Boolean(el.closest(wfChromeSel));
+const wfHidden = (el) => el.checkVisibility ? !el.checkVisibility() : Boolean(el.closest("[hidden]"));
+const wfSearchSel = "input[type='search'], input[role='searchbox'], [role='search'] input:not([type='hidden']), search input:not([type='hidden'])";
+const wfScoped = (main, sel) => [...main.querySelectorAll(sel)].filter((el) => main !== document.body || !wfInChrome(el));
+const wfDisclosures = (main) => {
+  const native = [...main.querySelectorAll("details")];
+  const aria = [...main.querySelectorAll("button[aria-expanded][aria-controls], [role='button'][aria-expanded][aria-controls]")]
+    .filter((el) => !wfInChrome(el) && document.getElementById(el.getAttribute("aria-controls")));
+  return [...native, ...aria];
+};
+const wfFields = (main) => {
+  const inside = wfScoped(main, "input:not([type='hidden']), textarea, select");
+  const found = [...inside];
+  for (const el of document.querySelectorAll(wfSearchSel)) if (!found.includes(el)) found.push(el);
+  return found;
+};
+const wfButtons = (main) => wfScoped(main, "button, input[type='submit'], input[type='button']");
+const wfLinks = (main) => [...main.querySelectorAll("a[href]")];
+const wfPick = (kind, index) => {
+  const main = wfScope();
+  let el = null;
+  if (kind === "disclosure") {
+    el = wfDisclosures(main)[index];
+    if (el && el.tagName === "DETAILS") el = el.querySelector("summary") || el;
+  } else if (kind === "field") el = wfFields(main)[index];
+  else if (kind === "button") el = wfButtons(main)[index];
+  else if (kind === "link") el = wfLinks(main)[index];
+  return el || null;
+};
+"""
+
+OBSERVE_JS = "() => {" + COLLECT_JS + r"""
+  const clean = (value, limit) => (value || "").trim().replace(/\s+/g, " ").slice(0, limit);
+  const textOf = (el) => clean(el && (el.innerText || el.getAttribute("aria-label") || el.value || ""), 400);
+  const main = wfScope();
   const labelFor = (el) => {
     if (el.id) {
-      const label = document.querySelector(`label[for="${el.id}"]`);
+      const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
       if (label) return textOf(label);
     }
-    return el.getAttribute("aria-label") || el.name || el.id || "field";
+    const wrapping = el.closest("label");
+    if (wrapping && textOf(wrapping)) return textOf(wrapping);
+    return el.getAttribute("aria-label") || el.getAttribute("title") || el.name || el.id || "field";
   };
-  const isHidden = (el) => el.checkVisibility ? !el.checkVisibility() : Boolean(el.closest("[hidden]"));
-  const sensitive = /password|passwd|card|cvv|cvc|ssn|secret|token|iban/i;
-  const details = [...main.querySelectorAll("details")].map((el, index) => {
-    const answerNode = [...el.children].find((node) => node.tagName !== "SUMMARY");
+  const sensitive = /password|passwd|passcode|card|cvv|cvc|ssn|secret|token|iban|routing.?number/i;
+  const sensitiveAuto = /^(cc-|current-password|new-password|one-time-code)/i;
+  const disclosures = wfDisclosures(main).map((el, index) => {
+    if (el.tagName === "DETAILS") {
+      const answerNode = [...el.children].find((node) => node.tagName !== "SUMMARY");
+      return {
+        index, kind: "details", summary: textOf(el.querySelector("summary")), answer: textOf(answerNode),
+        open: Boolean(el.open), id: el.id || "", hidden: wfHidden(el)
+      };
+    }
+    const panel = document.getElementById(el.getAttribute("aria-controls"));
     return {
-      index,
-      summary: textOf(el.querySelector("summary")),
-      answer: textOf(answerNode),
-      open: Boolean(el.open),
-      id: el.id || ""
+      index, kind: "aria", summary: textOf(el), answer: panel && el.getAttribute("aria-expanded") === "true" ? textOf(panel) : "",
+      open: el.getAttribute("aria-expanded") === "true", id: el.id || "", hidden: wfHidden(el)
     };
   });
-  const links = [...main.querySelectorAll("a[href]")].map((el, index) => ({
+  const links = wfLinks(main).map((el, index) => ({
     index,
     name: textOf(el),
     href: el.getAttribute("href") || "",
     path: el.pathname || "",
+    abs: el.href || "",
     same_origin: el.origin === location.origin,
     context: el.closest("li") ? clean(el.closest("li").innerText, 200) : "",
-    hidden: isHidden(el),
+    region: wfInChrome(el) ? "chrome" : "content",
+    download: el.hasAttribute("download"),
+    hidden: wfHidden(el),
     id: el.id || ""
   }));
-  const buttons = [...main.querySelectorAll("button")].map((el, index) => ({
+  const buttons = wfButtons(main).map((el, index) => ({
     index,
     name: textOf(el),
-    type: (el.getAttribute("type") || "submit").toLowerCase(),
+    type: (el.getAttribute("type") || (el.form ? "submit" : "button")).toLowerCase(),
     disabled: Boolean(el.disabled),
+    hidden: wfHidden(el),
     id: el.id || ""
   }));
-  const fields = [...main.querySelectorAll("input:not([type='hidden']), textarea, select")].map((el, index) => {
-    const type = (el.getAttribute("type") || el.tagName).toLowerCase();
+  const fields = wfFields(main).map((el, index) => {
+    const tag = el.tagName.toLowerCase();
+    let type = (el.getAttribute("type") || (tag === "input" ? "text" : tag)).toLowerCase();
     const name = labelFor(el);
-    const secret = type === "password" || sensitive.test(name) || sensitive.test(el.name || "");
+    const hay = `${el.name || ""} ${el.id || ""} ${el.getAttribute("placeholder") || ""} ${el.getAttribute("aria-label") || ""}`;
+    const secret = type === "password" || sensitive.test(name) || sensitive.test(el.name || "") || sensitive.test(el.id || "")
+      || sensitiveAuto.test(el.getAttribute("autocomplete") || "");
+    const searchLike = type === "search" || el.getAttribute("role") === "searchbox"
+      || ((tag === "input" || tag === "textarea") && ["text", "search", "textarea"].includes(type) && !secret
+        && (Boolean(el.closest("[role='search'], search")) || /search/i.test(hay) || el.name === "q"));
+    if (searchLike && !secret) type = "search";
+    let value = secret ? "" : (el.value || "");
+    let options = [];
+    if (tag === "select") {
+      options = [...el.options].slice(0, 40).map((option) => ({
+        label: clean(option.label || option.textContent, 80), value: option.value, disabled: option.disabled, selected: option.selected
+      }));
+      const chosen = el.selectedOptions && el.selectedOptions[0];
+      value = secret ? "" : (chosen && chosen.value !== "" ? clean(chosen.label || chosen.textContent, 80) : "");
+    }
     return {
-      index,
-      name,
-      type,
-      value: secret ? "" : (el.value || ""),
+      index, name, type, value, options,
       sensitive: secret,
+      field_name: el.name || "",
+      region: wfInChrome(el) ? "chrome" : "content",
       placeholder: secret ? "" : (el.getAttribute("placeholder") || ""),
+      hidden: wfHidden(el),
       id: el.id || ""
     };
   });
-  const headings = [...main.querySelectorAll("h1, h2, h3")].map((el, index) => ({
+  const headings = [...main.querySelectorAll("h1, h2, h3")].filter((el) => !wfHidden(el)).map((el, index) => ({
     index,
     level: el.tagName.toLowerCase(),
     text: textOf(el)
   }));
   const status = textOf(main.querySelector("[role='status']"));
+  const bodyText = (document.body.innerText || "").slice(0, 4000);
+  const challenge = /verify (that )?you are (a )?human|are you a robot|checking your browser|unusual traffic from your|complete the security check|press (and|&) hold|needs to review the security of your connection/i;
+  const widgetSel = "iframe[src*='recaptcha'], iframe[src*='hcaptcha'], iframe[src*='challenges.cloudflare.com'], .g-recaptcha, .h-captcha, .cf-turnstile";
+  const widget = [...document.querySelectorAll(widgetSel)].some((el) => !wfHidden(el));
+  const thin = bodyText.length < 1500;
+  const signals = {
+    captcha_widget: widget,
+    challenge: thin && (challenge.test(bodyText) || /^(just a moment|attention required|are you a robot)/i.test(document.title) || widget)
+  };
   return {
     title: document.title,
     h1: textOf(main.querySelector("h1")) || document.title,
     purpose: textOf(main.querySelector("p")) || textOf(main.querySelector("h1")) || document.title,
     excerpt: textOf(main),
     fulltext: (main.innerText || "").replace(/[ \t]+/g, " ").slice(0, 6000),
-    headings, details, links, buttons, fields, status,
+    headings, details: disclosures, links, buttons, fields, status, signals,
     html: document.documentElement.outerHTML
   };
 }
 """
 
+ELEMENT_JS = "(arg) => {" + COLLECT_JS + "return wfPick(arg.kind, arg.index);}"
+
 CALL_TIMEOUT_S = 45
 MAX_LIVE_PAGES = 4
-FIELD_SELECTOR = "input:not([type='hidden']), textarea, select"
+OPEN_TIMEOUT_MS = 15000
+SETTLE_STEP_MS = 100
+WRITE_RECIPES = {"activate", "follow", "search", "fill", "choose", "filter", "submit"}
+READ_RECIPES = {"read", "topics", "compare", "answer", "fields"}
+
+
+def change_timeout_ms() -> int:
+    """How long to keep re-reading after an action before saying nothing changed."""
+    try:
+        return max(0, int(os.environ.get("WAYFINDER_CHANGE_TIMEOUT_MS", "1500")))
+    except ValueError:
+        return 1500
+
+
+def _reason(exc: BaseException) -> str:
+    text = str(exc)
+    if "ERR_NAME_NOT_RESOLVED" in text:
+        return "the address was not found"
+    if "ERR_CONNECTION_REFUSED" in text:
+        return "the connection was refused"
+    if "ERR_UNSAFE_PORT" in text:
+        return "the browser blocks that port"
+    if "ERR_CERT" in text or "SSL" in text:
+        return "its security certificate was not accepted"
+    if "Timeout" in text or "ERR_TIMED_OUT" in text:
+        return "it took too long to answer"
+    if "Download is starting" in text:
+        return "it is a file download, not a web page"
+    return "the browser could not load it"
 
 
 class BrowserUnavailable(RuntimeError):
@@ -159,6 +265,11 @@ class BrowserBridge:
         self._failures: dict[str, PageObservation] = {}
         self._versions: dict[str, int] = {}
         self._trail: dict[str, list[str]] = {}
+        self._status: dict[str, int] = {}
+        self._ctype: dict[str, str] = {}
+        self._focus: dict[str, int] = {}
+        self._submitted: dict[str, str] = {}
+        self._queried: dict[str, tuple[str, str]] = {}
         self.adapter = "playwright"
 
     # ---- public API: every call runs on the worker thread ----
@@ -169,8 +280,8 @@ class BrowserBridge:
     def reset_pages(self) -> None:
         self._worker.call(self._reset_pages)
 
-    def open(self, session_id: str, target: str) -> PageObservation:
-        return self._worker.call(self._open, session_id, target)
+    def open(self, session_id: str, target: str, url: str | None = None) -> PageObservation:
+        return self._worker.call(self._open, session_id, target, url)
 
     def observe(self, session_id: str) -> PageObservation:
         return self._worker.call(self._observe, session_id)
@@ -180,6 +291,10 @@ class BrowserBridge:
 
     def act(self, session_id: str, recipe: str, faults: set[str]) -> tuple[ExecResult, PageObservation]:
         return self._worker.call(self._act, session_id, recipe, faults)
+
+    def wait_for_change(self, session_id: str, stamp: str, timeout_ms: int | None = None) -> PageObservation:
+        """Re-read until the page stamp differs from `stamp`, or the timeout passes."""
+        return self._worker.call(self._settle, session_id, stamp, change_timeout_ms() if timeout_ms is None else timeout_ms)
 
     def forget(self, session_id: str) -> None:
         self._worker.call(self._forget, session_id)
@@ -208,6 +323,16 @@ class BrowserBridge:
             self._server.server_close()
             self._server = None
 
+    def _clear(self, session_id: str) -> None:
+        self._failures.pop(session_id, None)
+        self._versions.pop(session_id, None)
+        self._trail.pop(session_id, None)
+        self._status.pop(session_id, None)
+        self._ctype.pop(session_id, None)
+        self._focus.pop(session_id, None)
+        self._submitted.pop(session_id, None)
+        self._queried.pop(session_id, None)
+
     def _reset_pages(self) -> None:
         for page in self._pages.values():
             try:
@@ -218,12 +343,15 @@ class BrowserBridge:
         self._failures.clear()
         self._versions.clear()
         self._trail.clear()
+        self._status.clear()
+        self._ctype.clear()
+        self._focus.clear()
+        self._submitted.clear()
+        self._queried.clear()
 
     def _forget(self, session_id: str) -> None:
         page = self._pages.pop(session_id, None)
-        self._failures.pop(session_id, None)
-        self._versions.pop(session_id, None)
-        self._trail.pop(session_id, None)
+        self._clear(session_id)
         if page is not None:
             try:
                 page.context.close()
@@ -234,28 +362,40 @@ class BrowserBridge:
         page = self._pages.get(session_id)
         return page.url if page is not None else ""
 
-    def _open(self, session_id: str, target: str) -> PageObservation:
-        if target not in TARGETS and target != "public":
+    def _open(self, session_id: str, target: str, url: str | None = None) -> PageObservation:
+        if target not in TARGETS and target not in {"public", "url"}:
             raise KeyError(target)
         page = self._page(session_id)
-        self._failures.pop(session_id, None)
-        self._versions.pop(session_id, None)
-        self._trail.pop(session_id, None)
+        self._clear(session_id)
+        if target == "url":
+            return self._open_external(session_id, page, normalize_url(url))
         if target == "public":
-            url = public_url()
-            try:
-                page.goto(url, wait_until="domcontentloaded", timeout=8000)
-            except Exception:
-                observation = failure_observation(
-                    url,
-                    "The public page could not be read. No actions were invented. "
-                    "A local FAQ, search, or form page can still be opened through the browser.",
-                )
-                self._failures[session_id] = observation
-                return observation
-        else:
-            page.goto(self._local(target), wait_until="domcontentloaded", timeout=10000)
+            return self._open_external(session_id, page, public_url())
+        page.goto(self._local(target), wait_until="domcontentloaded", timeout=10000)
         return self._observe(session_id)
+
+    def _open_external(self, session_id: str, page, url: str) -> PageObservation:
+        """Open a page from the network. Any failure is reported, never guessed around."""
+        try:
+            page.goto(url, wait_until="domcontentloaded", timeout=OPEN_TIMEOUT_MS)
+        except Exception as exc:  # noqa: BLE001 - every network failure becomes an honest page
+            observation = failure_observation(url, unreachable_message(url, _reason(exc)))
+            self._failures[session_id] = observation
+            return observation
+        try:
+            # Many pages build their content after the first paint. Give them a moment.
+            page.wait_for_load_state("networkidle", timeout=2500)
+        except Exception:
+            pass
+        return self._observe(session_id)
+
+    def _evaluate(self, page) -> dict:
+        try:
+            return page.evaluate(OBSERVE_JS)
+        except Exception:
+            # A navigation may have been in flight when the read started. Read once more.
+            page.wait_for_load_state("domcontentloaded", timeout=5000)
+            return page.evaluate(OBSERVE_JS)
 
     def _observe(self, session_id: str) -> PageObservation:
         failed = self._failures.get(session_id)
@@ -264,13 +404,40 @@ class BrowserBridge:
         page = self._pages.get(session_id)
         if page is None:
             return failure_observation("about:blank", "No browser page is open.")
-        raw = page.evaluate(OBSERVE_JS)
+        raw = self._evaluate(page)
         version = self._versions.get(session_id, 0) + 1
         self._versions[session_id] = version
         trail = self._trail.setdefault(session_id, [])
         if not trail or trail[-1] != page.url:
             trail.append(page.url)
-        return observe_from_dom(raw, page.url, version=version)
+        blocked = detect_blocker(raw, page.url, self._status.get(session_id, 0), self._ctype.get(session_id, ""))
+        if blocked is not None:
+            return blocked_observation(page.url, blocked[0], blocked[1], version=version)
+        observation = observe_from_dom(raw, page.url, version=version, focus=self._focus.get(session_id))
+        if not observation.status and self._submitted.get(session_id) == observation.stamp:
+            # A page with no status area says nothing about a submit. The only honest evidence
+            # is that this fresh read differs from the one before the confirmed submit.
+            observation.facts["submitted"] = True
+        queried = self._queried.get(session_id)
+        if queried is not None and queried[0] == observation.stamp:
+            observation.facts["query"] = queried[1]
+        return observation
+
+    def _settle(self, session_id: str, stamp: str, timeout_ms: int) -> PageObservation:
+        """Re-read until the stamp changes or the timeout passes. Returns the last fresh read."""
+        page = self._pages.get(session_id)
+        deadline = time.monotonic() + timeout_ms / 1000
+        observation = self._observe(session_id)
+        waited = False
+        while observation.stamp == stamp and page is not None and time.monotonic() < deadline:
+            page.wait_for_timeout(SETTLE_STEP_MS)
+            observation = self._observe(session_id)
+            waited = True
+        if waited and observation.stamp != stamp and page is not None:
+            # The change just arrived. Read once more so a half-built page is not the evidence.
+            page.wait_for_timeout(SETTLE_STEP_MS)
+            observation = self._observe(session_id)
+        return observation
 
     def _back(self, session_id: str) -> bool:
         if session_id in self._failures:
@@ -290,11 +457,13 @@ class BrowserBridge:
         if page.url == before or page.url == "about:blank":
             return False
         trail.pop()
+        self._focus.pop(session_id, None)
         return True
 
     def _act(self, session_id: str, recipe: str, faults: set[str]) -> tuple[ExecResult, PageObservation]:
         before = self._observe(session_id)
-        if session_id in self._failures or recipe in {"read", "topics", "compare", "answer", "fields"}:
+        kind = recipe.partition(":")[0]
+        if session_id in self._failures or before.blocker or recipe in READ_RECIPES or kind in READ_RECIPES:
             return ExecResult(status="unchanged", changed=False), before
         if "selector_failure" in faults:
             return ExecResult(status="rejected", error_class="selector_not_found", changed=False), before
@@ -303,37 +472,75 @@ class BrowserBridge:
             return ExecResult(status="applied", changed=False), before
         page = self._pages[session_id]
         try:
-            self._run(page, recipe)
-            page.wait_for_timeout(40)
+            self._run(page, session_id, recipe)
         except Exception:
             after = self._observe(session_id)
             return ExecResult(status="rejected", error_class="selector_not_found", changed=False), after
-        after = self._observe(session_id)
+        if kind in {"follow", "search", "submit"}:
+            try:
+                # A navigation may be under way. Let the new document finish before it is read.
+                page.wait_for_load_state("load", timeout=4000)
+            except Exception:
+                pass
+        after = self._settle(session_id, before.stamp, change_timeout_ms()) if kind in WRITE_RECIPES else self._observe(session_id)
+        if kind == "search":
+            self._queried.pop(session_id, None)
+            term = recipe.partition("=")[2].strip()
+            seen = f"{after.url} {after.title} {after.h1}".lower()
+            # A search that sends the person to another page leaves the box empty there. The
+            # fresh page still has to be different and has to carry the term in its address or title.
+            if term and after.stamp != before.stamp and not after.blocker and after.facts.get("query") != term:
+                if term.lower() in seen or term.lower().replace(" ", "+") in seen or term.lower().replace(" ", "%20") in seen:
+                    self._queried[session_id] = (after.stamp, term)
+                    after.facts["query"] = term
+        if kind == "submit":
+            if after.stamp != before.stamp and not after.blocker:
+                self._submitted[session_id] = after.stamp
+                if not after.status:
+                    after.facts["submitted"] = True
+            else:
+                self._submitted.pop(session_id, None)
         return ExecResult(status="applied", changed=after.stamp != before.stamp), after
 
-    def _root(self, page):
-        main = page.locator("main")
-        return main.first if main.count() else page.locator("body")
+    def _element(self, page, kind: str, index: int):
+        handle = page.evaluate_handle(ELEMENT_JS, {"kind": kind, "index": index})
+        element = handle.as_element()
+        if element is None:
+            raise LookupError(f"no {kind} number {index}")
+        return element
 
-    def _run(self, page, recipe: str) -> None:
+    def _run(self, page, session_id: str, recipe: str) -> None:
         kind, _, rest = recipe.partition(":")
-        root = self._root(page)
         if kind == "activate":
-            root.locator("details").nth(int(rest)).locator("summary").first.click(timeout=3000)
+            self._focus[session_id] = int(rest)
+            self._element(page, "disclosure", int(rest)).click(timeout=3000)
             return
         if kind == "follow":
-            root.locator("a[href]").nth(int(rest)).click(timeout=3000)
-            page.wait_for_load_state("domcontentloaded")
+            link = self._element(page, "link", int(rest))
+            self._focus.pop(session_id, None)
+            if (link.get_attribute("target") or "").lower() == "_blank":
+                # A new tab would leave the page Wayfinder is tracking. Open it in this one.
+                page.goto(link.evaluate("el => el.href"), wait_until="domcontentloaded", timeout=OPEN_TIMEOUT_MS)
+            else:
+                link.click(timeout=3000)
+                page.wait_for_load_state("domcontentloaded")
             return
-        if kind in {"search", "fill"}:
+        if kind in {"search", "fill", "choose"}:
             index, _, value = rest.partition("=")
-            field = root.locator(FIELD_SELECTOR).nth(int(index))
+            field = self._element(page, "field", int(index))
+            if field.evaluate("el => el.type === 'password'"):
+                raise RuntimeError("passwords are never typed")
+            if kind == "choose":
+                chosen = field.select_option(label=value, timeout=3000)
+                if not chosen:
+                    raise LookupError(f"no option {value}")
+                return
             field.fill(value, timeout=3000)
             if kind == "search":
                 field.press("Enter")
             return
         if kind in {"filter", "submit"}:
-            root.locator("button").nth(int(rest)).click(timeout=3000)
+            self._element(page, "button", int(rest)).click(timeout=3000)
             return
         raise RuntimeError(f"unknown recipe {recipe}")
 
@@ -345,10 +552,21 @@ class BrowserBridge:
         while len(self._pages) >= MAX_LIVE_PAGES:
             oldest = next(iter(self._pages))
             self._forget(oldest)
-        context = browser.new_context()
+        context = browser.new_context(accept_downloads=False, locale="en-US")
         page = context.new_page()
+        page.on("dialog", lambda dialog: dialog.dismiss())
+        page.on("response", lambda response, sid=session_id, p=page: self._note_response(sid, p, response))
         self._pages[session_id] = page
         return page
+
+    def _note_response(self, session_id: str, page, response) -> None:
+        """Remember how the last page document answered. Sub-resources are ignored."""
+        try:
+            if response.request.is_navigation_request() and response.frame == page.main_frame:
+                self._status[session_id] = response.status
+                self._ctype[session_id] = (response.headers.get("content-type") or "").lower()
+        except Exception:
+            return
 
     def _chromium(self):
         if self._browser is not None:

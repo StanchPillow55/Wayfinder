@@ -6,7 +6,7 @@ import time
 import uuid
 
 from wayfinder.browser.bridge import BrowserUnavailable
-from wayfinder.browser.families import PageObservation, entry_control, failure_observation
+from wayfinder.browser.families import PageObservation, entry_control, failure_observation, normalize_url
 from wayfinder.contracts import ADR_ID, BOX3_ID, DEVKIT_ID, P4_ID
 from wayfinder.demo_site import build_snapshot
 from wayfinder.devices import DispatchResult
@@ -56,10 +56,20 @@ class SessionNotFound(Exception):
     """No Mac session matches the id."""
 
 
-def create_session(target: str | None = None) -> dict:
-    allowed = {None, "", "fixture", "faq", "search", "form", "unsupported", "public"}
+def create_session(target: str | None = None, url: str | None = None) -> dict:
+    allowed = {None, "", "fixture", "faq", "search", "form", "unsupported", "public", "url"}
+    if url and target in {None, ""}:
+        target = "url"
     if target not in allowed:
         raise TopologyError("unknown_page_target")
+    if target == "url" or url:
+        # Only a plain http(s) address reaches the browser. A page cannot choose this value.
+        if target != "url":
+            raise TopologyError("invalid_url")
+        try:
+            url = normalize_url(url)
+        except ValueError as exc:
+            raise TopologyError("invalid_url") from exc
     with runtime.lock:
         session = Session()
         runtime.sessions[session.id] = session
@@ -67,7 +77,7 @@ def create_session(target: str | None = None) -> dict:
         if target and target != "fixture":
             session.browser_target = target
             try:
-                runtime.browser.open(session.id, target)
+                runtime.browser.open(session.id, target, url)
                 session.mode = "browser"
             except BrowserUnavailable as exc:
                 session.mode = "fixture"
@@ -813,6 +823,18 @@ def _ingest(session: Session, message: DeviceMessage) -> dict:
     if message.type == "speech.event":
         return _turn(session, str(message.payload["transcript"]), None, "speech")
     if message.type == "touch.event":
+        from wayfinder import tactile_loop
+
+        payload = message.payload
+        if "demo_input" in payload and message.source != DEVKIT_ID:
+            raise TopologyError("invalid_payload")
+        if message.source == DEVKIT_ID:
+            # DevKit demo buttons and analog input share the keyboard command path.
+            origin = tactile_loop.board_origin(board)
+            if "demo_input" in payload:
+                return tactile_loop.apply_input(session, str(payload["demo_input"]), payload.get("level"), origin)  # type: ignore[arg-type]
+            if payload.get("control") in {"confirm", "stop"}:
+                return tactile_loop.apply_input(session, str(payload["control"]), None, origin)
         if "selection" in message.payload:
             return _turn(session, str(message.payload["selection"]), None, "touch")
         word = {"confirm": "yes", "deny": "no", "stop": "stop"}[str(message.payload["control"])]
@@ -953,12 +975,21 @@ def _emit(
         del session.traces[:100]
 
 
+def _tactile_demo(session: Session) -> dict:
+    from wayfinder import tactile_loop
+
+    return tactile_loop.demo_view(session)
+
+
 def _braille_view(speech: str) -> dict:
     cells = grade1_braille(speech)
     shown = cells[:480]
+    # One entry per run of non-blank cells, so the plate can name the word it just formed.
+    words = [token for token in speech.split(" ") if grade1_braille(token)]
     return {
         "grade": "1",
         "cells": shown,
+        "words": words,
         "truncated": len(cells) > len(shown),
         "note": "Software Grade 1 projection of the live speech. Not a motor command and not a physical Braille device.",
     }
@@ -1430,6 +1461,7 @@ def _view(session: Session) -> dict:
         "pending_confirmation": pending,
         "page": _page_view(session, snapshot),
         "tactile": session.tactile,
+        **_tactile_demo(session),
         "devices": [runtime.plane.entry(board_id) for board_id in (DEVKIT_ID, BOX3_ID, P4_ID)],
         "box3_display": session.box3_display,
         "evidence": list(session.evidence),

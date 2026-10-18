@@ -1,16 +1,7 @@
 let state = null;
-let brailleOffset = 0;
-let brailleSpeech = "";
-const brailleCols = 16;
-const brailleRows = 2;
-const brailleWindow = brailleCols * brailleRows;
-let brailleTiltX = 62;
-let brailleTiltZ = -22;
 
 const live = document.querySelector("#live");
 const command = document.querySelector("#command");
-const brailleScene = document.querySelector("#braille-scene");
-const brailleStage = document.querySelector("#braille-stage");
 
 function text(id, value) {
   document.querySelector(id).textContent = value;
@@ -165,6 +156,7 @@ function render() {
     form: "Room request form",
     unsupported: "Market poster, an unsupported page",
     public: "A public page, best effort",
+    url: "A web address you entered",
     fixture: "Harbor Line, the offline fixture",
   };
   text("#target-status", `Open page: ${labels[state.target] || state.target}. Adapter: ${state.adapter}.`);
@@ -181,7 +173,8 @@ function render() {
         : "The DevKit acknowledged this render on USB. A motor run is not verified by that acknowledgement alone.")
     : "No DevKit acknowledged this. The on-screen tactile view shows the state and the motor has not spun.";
   text("#tactile-text", `${tactile.label}. Pose ${tactile.state_token}. Planned run: ${run}. ${ack}`);
-  renderBraille();
+  WayfinderBraille.render(state);
+  WayfinderTactile.render(state);
 
   const glance = document.querySelector("#glance");
   glance.replaceChildren();
@@ -251,88 +244,21 @@ function render() {
     text("#confirm-text", "");
     if (focusedInside) command.focus();
   }
+  document.dispatchEvent(new CustomEvent("wayfinder:render", { detail: state }));
 }
 
-function applyBrailleTilt() {
-  brailleScene.style.transform = `rotateX(${brailleTiltX}deg) rotateZ(${brailleTiltZ}deg)`;
-}
+// A narrow hook for the hands-free modes (voice.js, vision.js). They use the same
+// turn and open-page calls as the buttons, so confirmation is still enforced by the session.
+window.WayfinderApp = { state: () => state, turn, openTarget };
 
-function renderBraille() {
-  const cells = state.braille?.cells || [];
-  if ((state.speech || "") !== brailleSpeech) {
-    brailleSpeech = state.speech || "";
-    brailleOffset = 0;
-  }
-  const maxOffset = Math.max(0, Math.ceil(cells.length / brailleWindow) * brailleWindow - brailleWindow);
-  if (brailleOffset > maxOffset) brailleOffset = maxOffset;
-  const plate = document.querySelector("#braille-plate");
-  plate.replaceChildren();
-  for (let row = 0; row < brailleRows; row += 1) {
-    const line = document.createElement("div");
-    line.className = "braille-line";
-    for (let col = 0; col < brailleCols; col += 1) {
-      const index = brailleOffset + row * brailleCols + col;
-      const mask = index < cells.length ? cells[index] : 0;
-      const cell = document.createElement("div");
-      cell.className = "braille-cell";
-      if (index < cells.length) cell.dataset.mask = String(mask);
-      for (const dot of [1, 4, 2, 5, 3, 6]) {
-        const pin = document.createElement("span");
-        pin.className = mask & (1 << (dot - 1)) ? "pin up" : "pin";
-        cell.append(pin);
-      }
-      line.append(cell);
-    }
-    plate.append(line);
-  }
-  const shown = Math.min(brailleWindow, Math.max(0, cells.length - brailleOffset));
-  const start = cells.length ? brailleOffset + 1 : 0;
-  const end = cells.length ? brailleOffset + shown : 0;
-  const note = state.braille?.note || "Software Grade 1 projection of the live speech.";
-  text(
-    "#braille-caption",
-    cells.length ? `Grade 1 Braille, cells ${start}–${end} of ${cells.length}. ${note}` : "No Braille cells yet.",
-  );
-  document.querySelector("#braille-prev").disabled = brailleOffset === 0;
-  document.querySelector("#braille-next").disabled = brailleOffset >= maxOffset;
-}
+WayfinderBraille.init();
+WayfinderTactile.init();
 
-let brailleDrag = null;
-brailleStage.addEventListener("pointerdown", (event) => {
-  brailleDrag = { x: event.clientX, y: event.clientY, tiltX: brailleTiltX, tiltZ: brailleTiltZ };
-  brailleStage.setPointerCapture(event.pointerId);
+// The tactile loop (tactile.js) hands back a fresh session view after a button or analog input.
+window.addEventListener("wayfinder:session-state", (event) => {
+  state = event.detail;
+  render();
 });
-brailleStage.addEventListener("pointermove", (event) => {
-  if (!brailleDrag) return;
-  brailleTiltZ = brailleDrag.tiltZ + (event.clientX - brailleDrag.x) * 0.35;
-  brailleTiltX = Math.max(28, Math.min(78, brailleDrag.tiltX - (event.clientY - brailleDrag.y) * 0.22));
-  applyBrailleTilt();
-});
-brailleStage.addEventListener("pointerup", () => {
-  brailleDrag = null;
-});
-brailleStage.addEventListener("pointercancel", () => {
-  brailleDrag = null;
-});
-brailleStage.addEventListener("keydown", (event) => {
-  if (event.key === "ArrowLeft") brailleTiltZ -= 8;
-  else if (event.key === "ArrowRight") brailleTiltZ += 8;
-  else if (event.key === "ArrowUp") brailleTiltX = Math.max(28, brailleTiltX - 6);
-  else if (event.key === "ArrowDown") brailleTiltX = Math.min(78, brailleTiltX + 6);
-  else return;
-  event.preventDefault();
-  applyBrailleTilt();
-});
-
-document.querySelector("#braille-prev").addEventListener("click", () => {
-  brailleOffset = Math.max(0, brailleOffset - brailleWindow);
-  renderBraille();
-});
-document.querySelector("#braille-next").addEventListener("click", () => {
-  brailleOffset += brailleWindow;
-  renderBraille();
-});
-applyBrailleTilt();
 
 document.querySelector("#command-form").addEventListener("submit", async (event) => {
   event.preventDefault();
@@ -421,12 +347,12 @@ window.addEventListener("keydown", (event) => {
   }
 });
 
-async function openTarget(target) {
-  text("#target-status", `Opening ${target}...`);
+async function openTarget(target, url) {
+  text("#target-status", `Opening ${url || target}...`);
   const response = await fetch("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ target }),
+    body: JSON.stringify(url ? { target: "url", url } : { target }),
   });
   if (!response.ok) {
     const failure = await response.json().catch(() => ({}));
@@ -440,6 +366,17 @@ async function openTarget(target) {
 
 document.querySelectorAll("[data-target]").forEach((button) => {
   button.addEventListener("click", () => openTarget(button.dataset.target));
+});
+
+document.querySelector("#url-form").addEventListener("submit", (event) => {
+  event.preventDefault();
+  const address = document.querySelector("#url-input").value.trim();
+  if (!/^https?:\/\/\S+$/i.test(address)) {
+    live.textContent = "Enter a full web address that starts with http:// or https://.";
+    text("#target-status", live.textContent);
+    return;
+  }
+  openTarget("url", address);
 });
 
 async function boot() {

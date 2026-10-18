@@ -52,6 +52,54 @@
       <p class="hint">Press 1 through 5 for an option when you are not typing and no confirmation is open. Escape declines a waiting confirmation.</p>
     </section>
 
+    <section class="panel" id="access" aria-labelledby="access-heading">
+      <h2 id="access-heading">Hands-free modes</h2>
+      <p class="hint">Two ways to use this page without a mouse. Turning one on leaves the command box, Braille, and your session as they are. Either mode can be turned off at any time.</p>
+
+      <h3 id="voice-heading">Use by voice</h3>
+      <div class="row">
+        <button type="button" id="voice-toggle" class="big" aria-pressed="false">Use by voice</button>
+        <button type="button" id="voice-talk" class="big" aria-pressed="false" aria-keyshortcuts="V">Talk: press once, then speak</button>
+      </div>
+      <p id="voice-heard" class="status-line" aria-live="polite" aria-atomic="true">Voice is off. Press Talk, or press V, then say a command such as “what is here”.</p>
+      <p class="hint">Say: what is here, next, previous, confirm, back, stop, read, help, search for something, set room to something, open harbor, open faq, open search, open form, or a number from 1 to 5. Confirm on an option that needs confirmation takes two spoken confirms: the first chooses it, the second says yes. Press V or Space when focus is not on a button or box. This uses your browser's speech recognition. In Chrome that audio goes to the browser vendor's service, so it is not offline. If your browser has none, the typed command box still works.</p>
+
+      <h3 id="vision-heading">Use by looking</h3>
+      <div class="row">
+        <button type="button" id="vision-toggle" class="big" aria-pressed="false">Use by looking</button>
+      </div>
+      <p id="vision-state" class="status-line" aria-live="polite" aria-atomic="true">Camera is off.</p>
+      <p id="vision-cursor" class="status-line">No option is highlighted by the camera selector.</p>
+      <div class="vision-stage" id="vision-stage" hidden>
+        <video id="vision-video" playsinline muted aria-label="Your laptop camera preview, shown only on this screen"></video>
+        <canvas id="vision-overlay" width="320" height="240" aria-hidden="true"></canvas>
+      </div>
+      <div class="row" id="vision-tuning" hidden>
+        <label for="vision-threshold">Motion needed to count as a move</label>
+        <input id="vision-threshold" type="range" min="4" max="30" value="10">
+        <span id="vision-meter">Motion 0.0. Waiting.</span>
+      </div>
+      <p class="hint"><strong>Laptop-camera demo. This is not gaze tracking, it is not a blink detector, and it is not the P4X-EYE.</strong> Put your face in the box. A deliberate head nod, lean, or hand wave in the box moves to the next option. Holding still for about two seconds right after that chooses the highlighted option. An option that needs confirmation needs the nod-then-hold signal a second time. Moving twice quickly declines. Holding still with no nod first does nothing, so an empty chair or a blank stare cannot choose. It can fail in dim or changing light, with a moving background, or with a camera that shifts. The video stays in this tab. No image is stored or sent, and none goes into the page model. If the browser's Face Detector is missing, a fixed box is used and nobody checks that a face is in it.</p>
+    </section>
+
+    <section class="panel tactile-loop" id="tactile-loop" aria-labelledby="tactile-loop-heading">
+      <h2 id="tactile-loop-heading">Tactile loop demo</h2>
+      <p id="tactile-cue-text">No word cue yet. When the plate forms a word, one short motor cue is planned for it. The motor has not spun.</p>
+      <p id="tactile-input-text">No button or analog event yet.</p>
+      <p id="tactile-cursor-text">No branch highlighted.</p>
+      <div class="row" role="group" aria-label="On-screen stand-ins for the DevKit buttons">
+        <button type="button" id="tactile-next" data-tactile-input="next">Next branch (stand-in for button A)</button>
+        <button type="button" id="tactile-confirm" data-tactile-input="confirm">Confirm (stand-in for button B)</button>
+        <button type="button" id="tactile-back" data-tactile-input="back">Back (stand-in for button C)</button>
+        <button type="button" id="tactile-stop" data-tactile-input="stop">Stop (stand-in for button C held)</button>
+      </div>
+      <div class="row">
+        <label for="tactile-analog">Branch position, low to high (stand-in for the analog input)</label>
+        <input id="tactile-analog" type="range" min="0" max="100" step="1" value="0">
+      </div>
+      <p class="hint">Demo map, not a clinical device. Buttons and the analog input on the DevKit are unverified pin assumptions, and the controls above are on-screen stand-ins that send the same actions. The cue shows the planned duty, duration, and word. It does not prove the motor rotated, it does not prove a blind user can complete a task, and this is not a physical Braille device.</p>
+    </section>
+
     <section class="panel" aria-labelledby="target-heading">
       <h2 id="target-heading">Open a page</h2>
       <p id="target-status">Opening the library help page.</p>
@@ -63,7 +111,12 @@
         <button type="button" data-target="public" aria-pressed="false">Public page (best effort)</button>
         <button type="button" data-target="fixture" aria-pressed="false">Harbor Line (offline fixture)</button>
       </div>
-      <p class="hint">Local pages are served to a headless Chromium that Playwright drives. The public page needs the network and may fail, and then Wayfinder says so. Harbor Line is the labeled regression fixture and offline fallback, not the live browser.</p>
+      <form id="url-form" class="row" novalidate>
+        <label for="url-input">Web address (http or https)</label>
+        <input id="url-input" name="url" type="url" inputmode="url" autocomplete="off" placeholder="https://example.org/">
+        <button type="submit" id="url-open">Open this address</button>
+      </form>
+      <p class="hint">Local pages are served to a headless Chromium that Playwright drives. A web address you type is opened the same way and read by its structure. Sites that are down, need a sign-in, or show a CAPTCHA are reported honestly and left unchanged. Wayfinder does not enter passwords or card numbers, and the local pages are always available. Harbor Line is the labeled regression fixture and offline fallback, not the live browser.</p>
     </section>
 
     <section class="panel" id="confirm" hidden aria-labelledby="confirm-heading">
@@ -146,6 +199,10 @@
   <footer>
     <p>ADR-001 and ADR-004. The actuator on hand is a 130 mini DC brushless motor. Its control signal is GPIO 18, an unverified assumption. No voltage, current, or driver pinout has been verified, nothing here energizes hardware, and the DevKit and BOX-3 and P4X-EYE are simulated unless a USB acknowledgement says otherwise.</p>
   </footer>
+  <script src="/static/braille.js"></script>
+  <script src="/static/tactile.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/voice.js"></script>
+  <script src="/static/vision.js"></script>
 </body>
 </html>

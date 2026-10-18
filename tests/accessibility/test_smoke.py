@@ -56,7 +56,7 @@ class _FocusOrder(HTMLParser):
 
 def test_keyboard_path_labels_and_live_status():
     page = (WEB / "index.html").read_text()
-    script = (WEB / "app.js").read_text()
+    script = (WEB / "app.js").read_text() + (WEB / "braille.js").read_text()
     parsed = _FocusOrder()
     parsed.feed(page)
     ids = [item[1] for item in parsed.controls]
@@ -70,7 +70,7 @@ def test_keyboard_path_labels_and_live_status():
     assert 'event.key === "Escape"' in script
     assert 'turn({ text: "no" })' in script
     assert "state.pending_confirmation) return" in script
-    assert "ArrowLeft" in script and "brailleTiltZ" in script
+    assert "ArrowLeft" in script and "tiltZ" in script
     assert "live.textContent = state.speech" in script
     assert 'title="Page snapshot read by the browser adapter"' in page
     assert 'id="trace-id"' in page
@@ -78,6 +78,9 @@ def test_keyboard_path_labels_and_live_status():
     with TestClient(app) as client:
         assert client.get("/").status_code == 200
         assert client.get("/static/app.js").status_code == 200
+        assert client.get("/static/braille.js").status_code == 200
+        assert client.get("/static/voice.js").status_code == 200
+        assert client.get("/static/vision.js").status_code == 200
         assert client.get("/static/styles.css").status_code == 200
 
 

@@ -100,10 +100,19 @@ _ENTRY_INTO = re.compile(
 )
 
 
+_ENTRY_CHOOSE = re.compile(
+    r"^(?:choose|select|pick)\s+(?P<v>.+?)\s+(?:for|in|from|as)\s+(?:the\s+)?(?P<f>.+)$",
+    re.IGNORECASE,
+)
+
+
 def _entry(raw: str) -> tuple[str, str] | None:
     """A typed entry the user asked for. The field is checked against the page later."""
     cleaned = raw.strip().rstrip(".!?").strip()
     match = _ENTRY_INTO.match(cleaned)
+    if match:
+        return match.group("f").strip(), match.group("v").strip().strip("\"'")
+    match = _ENTRY_CHOOSE.match(cleaned)
     if match:
         return match.group("f").strip(), match.group("v").strip().strip("\"'")
     match = _ENTRY_SET.match(cleaned)

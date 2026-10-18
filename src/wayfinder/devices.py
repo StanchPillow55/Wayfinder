@@ -2,13 +2,30 @@
 
 Boards never address each other. UART to a C3 display is not a transport here.
 See ADR-001.
+
+Connection state is reported from what actually happened, not from what is
+configured:
+
+- ``simulator``: no port env var set. Nothing physical is involved.
+- ``error``: an env var names a port that is missing or would not open.
+- ``usb``: the port opened. That is not a health ACK.
+- ``loopback``: an in-process test stand-in. It is never a board.
+- ``Board.physical_ack`` becomes true only when a real serial link (not a
+  loopback) returns a typed ack whose source is this board's id.
+
+Nothing in this module energizes a motor. A health ping never sends
+``tactile.render``. ``python -m wayfinder.devices --help`` lists the bench
+helpers (port discovery, before/after USB diff, health-only probe).
 """
 
 from __future__ import annotations
 
+import argparse
+import glob
 import json
 import os
 import queue
+import sys
 import threading
 import time
 import uuid
@@ -51,6 +68,12 @@ class Board:
     applied_sequences: set[int] = field(default_factory=set)
     port: str | None = None
     loopback: bool = False
+    physical_ack: bool = False
+    physical_ack_ms: int | None = None
+    last_ack_status: str | None = None
+    firmware: str | None = None
+    boot_health: dict | None = None
+    last_run: dict | None = None
 
 
 @dataclass
@@ -136,13 +159,15 @@ class SerialLink:
             except Exception:
                 self.errors += 1
                 continue
-            if message.type == "ack":
+            if message.type in {"ack", "error"}:
                 ack_id = str(message.payload.get("ack_message_id", ""))
                 with self.lock:
                     waiter = self.pending.get(ack_id)
                 if waiter is not None:
                     waiter.put(message.model_dump(mode="json"))
-                continue
+                    continue
+                if message.type == "ack":
+                    continue
             callback = self.on_event
             if callback is not None:
                 try:
@@ -240,6 +265,17 @@ class DevicePlane:
 
     def _open_serial(self, board: Board, port: str) -> None:
         opener = self.port_opener or _pyserial_opener
+        if self.port_opener is None and not os.path.exists(port):
+            board.connected = False
+            board.simulated = False
+            board.loopback = False
+            board.status = "error"
+            board.port = port
+            board.error = (
+                f"{board.port_env} names {port}, which does not exist. "
+                "Run python -m wayfinder.devices to list ports."
+            )
+            return
         try:
             handle = opener(port)
         except ImportError:
@@ -247,7 +283,7 @@ class DevicePlane:
             board.simulated = False
             board.loopback = False
             board.status = "error"
-            board.error = "pyserial is not installed"
+            board.error = "pyserial is not installed. Run: pip install -e '.[serial]'"
             return
         except Exception as exc:
             board.connected = False
@@ -293,12 +329,21 @@ class DevicePlane:
         board.port = port_name
         board.connected = True
         board.simulated = False
+        board.physical_ack = False
+        board.physical_ack_ms = None
+        board.last_ack_status = None
+        board.firmware = None
         board.loopback = loopback
         board.status = "loopback" if loopback else "usb"
         board.error = None
         return board
 
     def _relay(self, message: DeviceMessage) -> None:
+        board = self.boards.get(message.source)
+        if board is not None and message.type == "health" and not board.loopback:
+            board.boot_health = dict(message.payload)
+            firmware = message.payload.get("firmware")
+            board.firmware = firmware if isinstance(firmware, str) else None
         if self.on_event is not None:
             self.on_event(message)
 
@@ -307,6 +352,8 @@ class DevicePlane:
         link = self.links.pop(board_id, None)
         if link is not None:
             link.close()
+        board.physical_ack = False
+        board.physical_ack_ms = None
         if status == "disconnected":
             board.connected = False
             board.simulated = False
@@ -328,9 +375,27 @@ class DevicePlane:
         board = self.boards[DEVKIT_ID]
         board.actuator_enabled = enabled
         if enabled:
+            # Only a real link holds a firmware lockout latch to release.
+            # Simulator and disconnected boards have nothing to unlatch.
+            if board.connected and not board.simulated and DEVKIT_ID in self.links:
+                return self.dispatch(
+                    self.command(
+                        DEVKIT_ID,
+                        "safe_disable",
+                        {"state_token": "cleared", "detach": True, "lockout": False},
+                        trace_id="safe-enable",
+                    )
+                )
             return None
+        # Lockout is a Mac status that firmware also latches. It is not the same
+        # as a detach, which the next render may undo.
         return self.dispatch(
-            self.command(DEVKIT_ID, "safe_disable", {"state_token": "cleared", "detach": True}, trace_id="safe-disable")
+            self.command(
+                DEVKIT_ID,
+                "safe_disable",
+                {"state_token": "cleared", "detach": True, "lockout": True},
+                trace_id="safe-disable",
+            )
         )
 
     def directory(self) -> dict[str, list[dict[str, str]]]:
@@ -400,10 +465,23 @@ class DevicePlane:
             return self._result("timeout", False, board, started, None)
         board.last_ack = raw
         payload = raw.get("payload", {})
-        moved = payload.get("status") == "ok"
+        if raw.get("source") != board.board_id:
+            # Something else answered on this port. It is not this board.
+            board.last_ack_status = "wrong_board"
+            return self._result("wrong_board", False, board, started, raw)
+        if raw.get("type") == "error":
+            code = str(payload.get("code", "error"))
+            board.last_ack_status = code
+            return self._result(code, False, board, started, raw)
+        status = str(payload.get("status", "ok"))
+        board.last_ack_status = status
+        if not board.loopback:
+            board.physical_ack = True
+            board.physical_ack_ms = self.now_ms()
+        moved = status == "ok"
         if isinstance(payload.get("observed_angle_deg"), int):
             board.last_angle = payload["observed_angle_deg"]
-        return self._result(str(payload.get("status", "ok")), moved, board, started, raw)
+        return self._result(status, moved, board, started, raw)
 
     def _simulate(self, board: Board, message: DeviceMessage) -> dict:
         status = "ok"
@@ -424,10 +502,16 @@ class DevicePlane:
                     board.last_move_ms = now
                     board.pwm_attached = True
                     board.applied_sequences.add(message.sequence)
+                    board.last_run = {
+                        "duty_percent": message.payload.get("duty_percent"),
+                        "duration_ms": message.payload.get("duration_ms"),
+                        "direction": message.payload.get("direction"),
+                    }
             else:
                 board.last_angle = angle
                 board.last_move_ms = now
                 board.pwm_attached = not detach
+                board.last_run = None
         elif message.type == "display.render":
             board.display = dict(message.payload)
         elif message.type == "speech.render":
@@ -437,6 +521,8 @@ class DevicePlane:
         return ack
 
     def _ack(self, board: Board, message: DeviceMessage, status: str) -> dict:
+        # observed_angle_deg and pulse_us echo the commanded pulse hint. The
+        # motor does not hold an angle and nothing here observes it.
         observed = board.last_angle
         token = str(message.payload.get("state_token", "cleared"))
         body = {
@@ -454,7 +540,9 @@ class DevicePlane:
                 "status": status,
                 "observed_angle_deg": observed,
                 "state_token": token,
-                "pulse_us": angle_to_pulse(observed) if token in POSES or True else angle_to_pulse(observed),
+                "pulse_us": angle_to_pulse(observed),
+                **(board.last_run or {}),
+                **({"output_driven": False} if board.simulated else {}),
             },
             "requires_ack": False,
         }
@@ -507,8 +595,258 @@ class DevicePlane:
             device_angle=board.last_angle,
         )
 
+    def diagnostics(self) -> list[dict[str, object]]:
+        """Truthful per-board connection state for the bench. Not a UI string.
+
+        ``physical_motor_ran`` is always False here: no code path in this module
+        can observe a motor, and a health ACK is not a motor run.
+        """
+        rows: list[dict[str, object]] = []
+        for board in self.boards.values():
+            rows.append(
+                {
+                    "id": board.board_id,
+                    "hardware": board.hardware_name,
+                    "env_var": board.port_env,
+                    "port": board.port,
+                    "status": board.status,
+                    "state": _connection_state(board),
+                    "physical_ack": board.physical_ack,
+                    "last_ack_status": board.last_ack_status,
+                    "firmware": board.firmware,
+                    "error": board.error,
+                    "physical_motor_ran": False,
+                }
+            )
+        return rows
+
     def _board(self, board_id: str) -> Board:
         try:
             return self.boards[board_id]
         except KeyError as exc:
             raise TopologyError("unknown_endpoint") from exc
+
+
+def _connection_state(board: Board) -> str:
+    if board.status == "error":
+        return f"error: {board.error}"
+    if board.status == "disconnected":
+        return "disconnected by the operator"
+    if board.loopback:
+        return "loopback stand-in. No board is attached."
+    if board.simulated:
+        return f"simulator. {board.port_env} is not set, so nothing physical is involved."
+    if board.physical_ack:
+        return f"typed ack received from {board.board_id} on {board.port}. Not a motor run."
+    return f"port {board.port} opened. No typed ack from {board.board_id} yet."
+
+
+# ---- bench helpers: port discovery, USB diff, health-only probe ----------------
+
+BOARD_PORT_ENV = {
+    DEVKIT_ID: "WAYFINDER_DEVKIT_PORT",
+    BOX3_ID: "WAYFINDER_BOX3_PORT",
+    P4_ID: "WAYFINDER_P4_PORT",
+}
+
+# USB vendor ids are public. They hint at a bridge chip or native USB, never at
+# which board sits behind it.
+_VENDOR_HINTS = {
+    0x303A: "Espressif native USB (ESP32-S3 or P4 candidates; cannot tell which board)",
+    0x10C4: "Silicon Labs CP210x UART bridge",
+    0x1A86: "WCH CH34x UART bridge",
+    0x0403: "FTDI UART bridge",
+}
+
+
+@dataclass(frozen=True)
+class PortInfo:
+    device: str
+    description: str = ""
+    vid: int | None = None
+    pid: int | None = None
+    source: str = "glob"
+    likely_board: bool = False
+    hint: str = ""
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "device": self.device,
+            "description": self.description,
+            "vid": f"{self.vid:04x}" if self.vid is not None else None,
+            "pid": f"{self.pid:04x}" if self.pid is not None else None,
+            "source": self.source,
+            "likely_board": self.likely_board,
+            "hint": self.hint,
+        }
+
+
+def _looks_like_usb_serial(name: str) -> bool:
+    lowered = os.path.basename(name).lower()
+    return any(token in lowered for token in ("usb", "slab", "acm"))
+
+
+def discover_serial_ports() -> list[PortInfo]:
+    """List serial ports without choosing one. Uses pyserial when installed, else /dev globs."""
+    found: dict[str, PortInfo] = {}
+    try:
+        from serial.tools import list_ports
+
+        for entry in list_ports.comports():
+            vid = getattr(entry, "vid", None)
+            hint = _VENDOR_HINTS.get(vid, "") if vid is not None else ""
+            found[entry.device] = PortInfo(
+                device=entry.device,
+                description=str(getattr(entry, "description", "") or ""),
+                vid=vid,
+                pid=getattr(entry, "pid", None),
+                source="pyserial",
+                likely_board=bool(hint) or _looks_like_usb_serial(entry.device),
+                hint=hint,
+            )
+    except ImportError:
+        pass
+    for pattern in ("/dev/cu.*", "/dev/ttyUSB*", "/dev/ttyACM*"):
+        for device in sorted(glob.glob(pattern)):
+            if device not in found:
+                found[device] = PortInfo(
+                    device=device,
+                    source="glob",
+                    likely_board=_looks_like_usb_serial(device),
+                )
+    return sorted(found.values(), key=lambda port: (not port.likely_board, port.device))
+
+
+def port_environment() -> dict[str, str | None]:
+    return {env: os.environ.get(env) or None for env in BOARD_PORT_ENV.values()}
+
+
+def _print_ports(ports: list[PortInfo], out) -> None:
+    likely = [port for port in ports if port.likely_board]
+    other = [port for port in ports if not port.likely_board]
+    if not ports:
+        print("No serial ports found. Check that the cable carries data and the board is powered.", file=out)
+    if likely:
+        print("Candidate USB serial ports:", file=out)
+        for port in likely:
+            extra = f"  [{port.hint}]" if port.hint else ""
+            ids = f"  vid:pid={port.vid:04x}:{port.pid:04x}" if port.vid is not None and port.pid is not None else ""
+            print(f"  {port.device}{ids}{extra}", file=out)
+    if other:
+        print("Other serial devices (probably not a board):", file=out)
+        for port in other:
+            print(f"  {port.device}", file=out)
+
+
+def _print_environment(out) -> None:
+    print("Port environment variables (unset means that board runs as a simulator):", file=out)
+    for board_id, env in BOARD_PORT_ENV.items():
+        value = os.environ.get(env)
+        print(f"  {env}={value if value else '(unset)'}  -> {board_id}", file=out)
+
+
+def probe_board(board_id: str, port: str, *, attempts: int = 4, out=None) -> int:
+    """Send health pings only. Never sends tactile.render, so no motor command is possible."""
+    out = out or sys.stdout
+    if board_id not in BOARD_PORT_ENV:
+        print(f"Unknown board id {board_id}. Use one of: {', '.join(BOARD_PORT_ENV)}", file=out)
+        return 2
+    plane = DevicePlane()
+    board = plane.boards[board_id]
+    plane.on_event = lambda message: None
+    plane._open_serial(board, port)
+    if board.status == "error":
+        print(f"Cannot open {port}: {board.error}", file=out)
+        return 2
+    code = 1
+    try:
+        for attempt in range(1, attempts + 1):
+            result = plane.ping(board_id)
+            if result.acknowledged and board.physical_ack:
+                print(
+                    f"Typed health ACK from {board_id} on {port} (attempt {attempt}). "
+                    "This is a health ACK only. The motor has not been commanded.",
+                    file=out,
+                )
+                if board.firmware:
+                    print(f"Firmware reported: {board.firmware}", file=out)
+                code = 0
+                break
+            print(f"Attempt {attempt}: no ACK ({result.status}).", file=out)
+            if result.status == "wrong_board":
+                print(f"The port answered as a different board. Not {board_id}.", file=out)
+                code = 3
+                break
+            # Opening the port can reset an ESP32; give it time to boot.
+            time.sleep(0.8)
+        else:
+            print(
+                f"No typed ACK from {board_id} on {port}. If nothing is flashed, "
+                "this is expected. Do not treat the port as that board.",
+                file=out,
+            )
+    finally:
+        plane.shutdown()
+    return code
+
+
+def _diff_ports(out, wait=input) -> int:
+    before = {port.device: port for port in discover_serial_ports()}
+    print("Baseline with the boards UNPLUGGED:", file=out)
+    _print_ports(list(before.values()), out)
+    wait("\nPlug in ONE board by its data cable, wait 3 seconds, then press Enter: ")
+    after = {port.device: port for port in discover_serial_ports()}
+    added = [port for device, port in after.items() if device not in before]
+    gone = [device for device in before if device not in after]
+    if added:
+        print("New ports:", file=out)
+        _print_ports(added, out)
+        print(
+            "\nWrite these down. They are not assigned to a board until a health ACK arrives:\n"
+            "  python -m wayfinder.devices --probe <board_id> --port <path>",
+            file=out,
+        )
+        return 0
+    if gone:
+        print(f"Ports disappeared: {', '.join(gone)}", file=out)
+    print(
+        "No new port appeared. Try a different cable (many are charge-only), another socket, "
+        "or hold BOOT while plugging in.",
+        file=out,
+    )
+    return 1
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="python -m wayfinder.devices",
+        description="Bench helpers. Lists ports, diffs USB before/after plugging, and sends health pings only.",
+    )
+    parser.add_argument("--json", action="store_true", help="print ports and env state as JSON")
+    parser.add_argument("--diff", action="store_true", help="interactive before/after port diff")
+    parser.add_argument("--probe", metavar="BOARD_ID", help=f"health-only ping: {', '.join(BOARD_PORT_ENV)}")
+    parser.add_argument("--port", help="port for --probe. Defaults to that board's env var")
+    args = parser.parse_args(argv)
+
+    if args.probe:
+        port = args.port or os.environ.get(BOARD_PORT_ENV.get(args.probe, ""), "")
+        if not port:
+            env = BOARD_PORT_ENV.get(args.probe, "<env var>")
+            print(f"No port. Pass --port or set {env}.")
+            return 2
+        return probe_board(args.probe, port)
+    if args.diff:
+        return _diff_ports(sys.stdout)
+    ports = discover_serial_ports()
+    if args.json:
+        print(json.dumps({"ports": [port.as_dict() for port in ports], "env": port_environment()}, indent=2))
+        return 0
+    _print_ports(ports, sys.stdout)
+    print()
+    _print_environment(sys.stdout)
+    print("\nNothing here assigns a port to a board. Set the env var yourself after a health ACK.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -12,3 +12,6 @@ dist/
 build/
 .coverage
 htmlcov/
+
+# Local bench state written by scripts/hardware/bringup.sh (port snapshot, filled env snippet)
+.wayfinder-local/

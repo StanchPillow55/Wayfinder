@@ -27,6 +27,9 @@ from wayfinder.orchestrator import (
     set_fault,
 )
 from wayfinder.state import get_runtime
+from wayfinder.tactile_loop import handle_input as handle_tactile_input
+from wayfinder.tactile_loop import publish_word_cue
+from wayfinder.tactile_loop import status_view as tactile_status_view
 
 WEB_DIR = Path(__file__).resolve().parents[2] / "apps" / "web"
 
@@ -39,6 +42,7 @@ class TurnIn(BaseModel):
 
 class SessionIn(BaseModel):
     target: str | None = None
+    url: str | None = None
 
 
 class FaultIn(BaseModel):
@@ -97,15 +101,18 @@ def health():
         "retired": sorted(RETIRED_ENDPOINT_IDS),
         "actuator": ACTUATOR,
         "browser_adapter": "playwright",
-        "page_targets": ["faq", "search", "form", "unsupported", "public", "fixture"],
+        "page_targets": ["faq", "search", "form", "unsupported", "public", "fixture", "url"],
         "transports": ["usb_serial", "usb_debug", "simulator"],
     }
 
 
 @app.post("/api/sessions")
 def open_session(body: SessionIn | None = Body(default=None)):
-    """An empty body opens the Harbor Line fixture. A target opens a browser page."""
-    return create_session(body.target if body else None)
+    """An empty body opens the Harbor Line fixture. A target opens a browser page.
+
+    {"target": "url", "url": "https://..."} opens any http(s) page through Playwright.
+    """
+    return create_session(body.target if body else None, body.url if body else None)
 
 
 @app.get("/api/sessions/{session_id}")
@@ -138,6 +145,40 @@ def traces(session_id: str):
 @app.post("/api/sessions/{session_id}/device-messages")
 def device_messages(session_id: str, body: dict):
     return ingest_message(session_id, body)
+
+
+class CueIn(BaseModel):
+    word: str = Field(min_length=1, max_length=40)
+    index: int = Field(default=0, ge=0, le=500)
+    count: int = Field(default=1, ge=1, le=500)
+
+
+class TactileInputIn(BaseModel):
+    input: str = Field(pattern="^(next|confirm|back|stop|analog)$")
+    level: int | None = Field(default=None, ge=0, le=100)
+
+
+@app.post("/api/sessions/{session_id}/tactile/cue")
+def tactile_cue(session_id: str, body: CueIn):
+    """One bounded motor cue for a word the plate formed. Sent as tactile.render when a board is bound."""
+    return publish_word_cue(session_id, body.word, body.index, body.count)
+
+
+@app.post("/api/sessions/{session_id}/tactile/input")
+def tactile_input(session_id: str, body: TactileInputIn):
+    """On-screen stand-in for the DevKit buttons and analog input. Same actions as the board path."""
+    return handle_tactile_input(session_id, body.input, body.level, "on_screen")
+
+
+@app.get("/api/sessions/{session_id}/tactile")
+def tactile_status(session_id: str):
+    runtime = get_runtime()
+    with runtime.lock:
+        try:
+            session = runtime.sessions[session_id]
+        except KeyError as exc:
+            raise SessionNotFound(session_id) from exc
+        return tactile_status_view(session)
 
 
 @app.post("/api/devices/{board_id}/connection")

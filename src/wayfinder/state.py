@@ -56,6 +56,11 @@ class Session:
         self.last_turn_id = ""
         self.last_trace_id = ""
         self.box3_display: dict | None = None
+        # Tactile loop (src/wayfinder/tactile_loop.py). Demo map, not a clinical device.
+        self.tactile_cue: dict | None = None
+        self.tactile_input: dict | None = None
+        self.tactile_input_seq = 0
+        self.branch_cursor: dict | None = None
 
 
 class Runtime:

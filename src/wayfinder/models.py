@@ -292,6 +292,15 @@ def _validate_payload(message_type: str, payload: dict[str, object]) -> None:
         elif keys == {"control"}:
             if payload["control"] not in {"confirm", "deny", "stop"}:
                 raise TopologyError("invalid_payload")
+        elif keys == {"demo_input"}:
+            # Additive touch.event shape for the DevKit demo buttons (protocol stays 0.1,
+            # no new message type). The orchestrator accepts it from devkit_tactile only.
+            if payload["demo_input"] not in {"next", "back"}:
+                raise TopologyError("invalid_payload")
+        elif keys == {"demo_input", "level"}:
+            level = payload["level"]
+            if payload["demo_input"] != "analog" or isinstance(level, bool) or not isinstance(level, int) or not 0 <= level <= 100:
+                raise TopologyError("invalid_payload")
         else:
             raise TopologyError("invalid_payload")
     elif message_type == "tactile.render":
